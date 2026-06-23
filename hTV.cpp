@@ -135,16 +135,25 @@ int main(int argc, char* argv[]) {
     mpv_set_option_string(ctx.mpv, "osd-level", "1");
 
     // --- ENFORCE LIVE STREAM TIMELINE CACHING (SCROLL BACK IN TIME) ---
-    mpv_set_option_string(ctx.mpv, "cache", "yes");               // Force cache engine on
-    mpv_set_option_string(ctx.mpv, "demuxer-max-bytes", "200M");   // Allocate a 200MB RAM loop ring buffer
-    mpv_set_option_string(ctx.mpv, "demuxer-max-back-bytes", "150M"); // Keep up to 150MB of past video in memory
-    mpv_set_option_string(ctx.mpv, "force-seekable", "yes");      // Override the tuner's "unseekable" flag
+    mpv_set_option_string(ctx.mpv, "cache", "yes");               
+    mpv_set_option_string(ctx.mpv, "demuxer-max-bytes", "200M");  
+    mpv_set_option_string(ctx.mpv, "demuxer-max-back-bytes", "150M");
+    mpv_set_option_string(ctx.mpv, "force-seekable", "yes");     
+
+    // Force mpv to drop video frames to keep audio pitch completely native
+    mpv_set_option_string(ctx.mpv, "video-sync", "audio");
+
+    mpv_set_option_string(ctx.mpv, "audio-pitch-correction", "no");
 
 
     if (mpv_initialize(ctx.mpv) < 0) {
         fprintf(stderr, "Failed to initialize mpv client layout core\n");
         return 1;
     }
+    
+   // Initialize playback speed to the perfect 1.05 audio baseline pitch modification
+    double initialSpeed = 1.05;
+    mpv_set_option_string(ctx.mpv, "speed", "1.05");
 
     mpv_opengl_init_params glParams{
         [](void* ctx, const char* name) -> void* {
@@ -191,7 +200,29 @@ int main(int argc, char* argv[]) {
                         case SDLK_q: {
                             ctx.isRunning = false;
                             break;
+                        }                        
+                        
+                        case SDLK_UP: {
+                            mpv_command_string(ctx.mpv, "add volume 5");
+                            break;
                         }
+                        case SDLK_DOWN: {
+                            mpv_command_string(ctx.mpv, "add volume -5");
+                            break;
+                        }
+                        // --- MULTIMEDIA TIMING DRIFT CORRECTION SHORTCUTS ---
+                        case SDLK_LEFTBRACKET: {
+                            // Subtly slow down audio speed (lowers pitch)
+                            mpv_command_string(ctx.mpv, "add speed -0.01");
+                            break;
+                        }
+                        case SDLK_RIGHTBRACKET: {
+                            // Subtly speed up audio speed (raises pitch / sharpens vocals)
+                            mpv_command_string(ctx.mpv, "add speed 0.01");
+                            break;
+                        }
+
+
                         case SDLK_f: {
                             ctx.isFullscreen = !ctx.isFullscreen;
                             SDL_SetWindowFullscreen(ctx.window, ctx.isFullscreen ? SDL_WINDOW_FULLSCREEN_DESKTOP : 0);
@@ -258,8 +289,28 @@ int main(int argc, char* argv[]) {
                     break;
                 }
 
+                case SDL_DROPFILE: {
+                    char* droppedFilePath = event.drop.file;
+                    if (droppedFilePath != nullptr && droppedFilePath[0] != '\0') {
+                        printf("[DEBUG] File received via Drag & Drop/Tracker: %s\n", droppedFilePath);
+                        
+                        // Pass the absolute path directly to libmpv
+                        const char* loadCmd[] = {"loadfile", droppedFilePath, nullptr};
+                        mpv_command(ctx.mpv, loadCmd);
+
+                        // --- NEW NATIVE POLISH MATCH ---
+                        // Force the application window to jump to the front and grab keyboard focus
+                        SDL_RaiseWindow(ctx.window);
+                    }
+                    
+                    SDL_free(droppedFilePath); // Safe memory cleanup
+                    break;
+                }
+
+
                 // 4. Custom User Event - Fired by on_mpv_render_update
                 case SDL_USEREVENT: {
+
                     // A new video matrix frame is officially decoded and waiting
                     needsRender = true;
                     break;
