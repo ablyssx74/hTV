@@ -1,4 +1,4 @@
-# Haiku SDL2 Audio/Video Streamer with nebula support.
+# Haiku SDL2 Audio/Video Streamer with nebula opengl support.
 - Requires patched mpv to play and patched mpv_devel to build
 -- [mpv-0.41.0-3-x86_64.hpkg](https://github.com/ablyssx74/Haiku_Recipes/blob/main/mpv_opengl/mpv-0.41.0-3-x86_64.hpkg)
 -- [mpv_devel-0.41.0-3-x86_64.hpkg](https://github.com/ablyssx74/Haiku_Recipes/blob/main/mpv_opengl/mpv_devel-0.41.0-3-x86_64.hpkg)
