@@ -87,7 +87,7 @@ endif
 
 # Deep system cleaning target
 clean:
-	rm -f *.o *.rsrc $(GUI_TARGET) 
+	rm -f *.o *.rsrc *.hpkg $(GUI_TARGET) 
 	rm -rf build
 
 
@@ -100,7 +100,6 @@ release: all
 	mkdir -p $(PACKAGE_DIR)/bin
 	mkdir -p $(PACKAGE_DIR)/data/deskbar/menu/Applications
 	cp $(GUI_TARGET) $(PACKAGE_DIR)/apps/$(GUI_TARGET)
-	cp HaikuDVRService.launch $(PACKAGE_DIR)/data/launch/HaikuDVRService
 	ln -s ../apps/$(GUI_TARGET) $(PACKAGE_DIR)/bin/$(GUI_TARGET)
 	ln -s ../../../../apps/$(GUI_TARGET) $(PACKAGE_DIR)/data/deskbar/menu/Applications/$(GUI_TARGET)
 	package create -C $(PACKAGE_DIR) $(GUI_TARGET)-$(VERSION)-1-$(ARCH).hpkg	
