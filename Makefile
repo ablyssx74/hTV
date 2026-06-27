@@ -1,7 +1,7 @@
 # hTV Build Script (Native Haiku OS Conversion)
 SHELL := /bin/bash
 GUI_TARGET = hTV
-VERSION = 1.0.2
+VERSION = 1.0.4
 PACKAGE_DIR := build/package
 DUMMY_PC_PATH := $(shell pwd)/build/pkgconfig
 
@@ -41,7 +41,7 @@ INCLUDES = -I/boot/home/config/non-packaged/include -I/boot/system/develop/heade
 LIB_PATH = -L/boot/system/lib$(LIB_ARCH_DIR) -L/boot/system/develop/lib$(LIB_ARCH_DIR) -L/boot/home/config/non-packaged/lib$(LIB_ARCH_DIR)
 
 # Core hTV Media Pipeline & Interface Libraries (Added -lmpv)
-EXTRA_LIBS = $(shell $(PKG_CONFIG_CMD) --libs projectM-4 sdl2) \
+EXTRA_LIBS = $(shell $(PKG_CONFIG_CMD) --libs sdl2) \
              -lmpv -lGL -lavformat -lavcodec -lavutil -lswscale -lswresample -lcurl -lnetwork
 
 

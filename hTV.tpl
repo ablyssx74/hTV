@@ -17,6 +17,7 @@ provides {
 requires {
 	haiku
 	libsdl2
+	curl
 }	
 urls {
 	"https://github.com/ablyssx74/hTV"

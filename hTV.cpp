@@ -12,6 +12,9 @@
 #include <string.h>
 
 
+
+
+
 // Global structures for player state tracking
 struct PlayerCtx {
     SDL_Window* window;
@@ -152,7 +155,7 @@ int main(int argc, char* argv[]) {
     }
     
    // Initialize playback speed to the perfect 1.05 audio baseline pitch modification
-    double initialSpeed = 1.05;
+    //double initialSpeed = 1.05;
     mpv_set_option_string(ctx.mpv, "speed", "1.05");
 
     mpv_opengl_init_params glParams{
@@ -183,6 +186,21 @@ int main(int argc, char* argv[]) {
     SDL_Event event;
     uint32_t lastTitleUpdate = 0;
     bool needsRender = false; // Tracks if a fresh frame actually arrived
+
+
+	{
+	    const char* targetUrl = "https://raw.githubusercontent.com/ablyssx74/hTV/refs/heads/main/VERSION";
+	    const char* localVersion = "v1.0.4"; 
+	
+	    char updateCmd[1024];
+	    snprintf(updateCmd, sizeof(updateCmd),
+	        "(REMOTE_V=$(curl -sL \"%s\" | tr -d '\\r\\n'); "
+	        "if [ ! -z \"$REMOTE_V\" ] && [ \"$REMOTE_V\" != \"%s\" ]; then "
+	        "notify --title \"Update Available\" --group \"hTV\" "
+	        "\"A newer version of hTV is available! ($REMOTE_V)\"; fi) &",
+	        targetUrl, localVersion);	
+	    system(updateCmd);
+	}
 
     while (ctx.isRunning) {
         // Wait indefinitely for any incoming event to drop idle CPU usage to 0%
@@ -334,6 +352,8 @@ int main(int argc, char* argv[]) {
             UpdatePlayerWindowTitle(&ctx);
             lastTitleUpdate = currentTime;
         }
+        
+
 
         // --- OPTIMIZED ATOMIC RENDER PASS ---
         // We ONLY execute graphics driver operations if libmpv signaled an active update flag.
