@@ -39,8 +39,7 @@ INCLUDES = -I/boot/home/config/non-packaged/include -I/boot/system/develop/heade
 LIB_PATH = -L/boot/system/lib$(LIB_ARCH_DIR) -L/boot/system/develop/lib$(LIB_ARCH_DIR) -L/boot/home/config/non-packaged/lib$(LIB_ARCH_DIR) 
 
 # Core hTV Media Pipeline & Interface Libraries (Added -lmpv)
-EXTRA_LIBS = $(shell $(PKG_CONFIG_CMD) --libs sdl2) \
-             -lmpv -lGL -lavformat -lavcodec -lavutil -lswscale -lswresample -lcurl -lnetwork
+EXTRA_LIBS = -lSDL2 -lmpv -lGL -lavformat -lavcodec -lavutil -lswscale -lswresample -lcurl -lnetwork
 
 
 # Added -lmedia to support BSoundPlayer architecture natively
