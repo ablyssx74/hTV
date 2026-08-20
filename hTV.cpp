@@ -1,5 +1,5 @@
 /*
- * Copyright 2026, Kris Beazley Cricket@epluribusunix.net
+ * Copyright 2026, Kris Beazley (ablyss) hTV@epluribusunix.net
  * All rights reserved. Distributed under the terms of the MIT license.
  */
  
