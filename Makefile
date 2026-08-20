@@ -1,7 +1,7 @@
 # hTV Build Script (Native Haiku OS Conversion)
 SHELL := /bin/bash
 GUI_TARGET = hTV
-VERSION = 1.0.3
+VERSION = 1.0.4
 PACKAGE_DIR := build/package
 DUMMY_PC_PATH := $(shell pwd)/build/pkgconfig
 
@@ -32,11 +32,9 @@ else
     PKG_CONFIG_CMD = pkg-config
 endif
 
-# Set up Pkg-Config Environment
-export PKG_CONFIG_PATH := $(DUMMY_PC_PATH):/boot/home/config/non-packaged/lib/pkgconfig:/boot/home/config/non-packaged/lib$(LIB_ARCH_DIR)/pkgconfig:/boot/system/develop/lib$(LIB_ARCH_DIR)/pkgconfig:
 
 # --- Compiler & Linker Flags ---
-CXXFLAGS = -std=c++17 -O3 -Wall -rdynamic -I/boot/system/develop/headers/private/shared
+CXXFLAGS = -std=c++17 -O3 -Wall -rdynamic 
 INCLUDES = -I/boot/home/config/non-packaged/include -I/boot/system/develop/headers
 LIB_PATH = -L/boot/system/lib$(LIB_ARCH_DIR) -L/boot/system/develop/lib$(LIB_ARCH_DIR) -L/boot/home/config/non-packaged/lib$(LIB_ARCH_DIR) 
 
@@ -48,8 +46,6 @@ EXTRA_LIBS = $(shell $(PKG_CONFIG_CMD) --libs sdl2) \
 # Added -lmedia to support BSoundPlayer architecture natively
 HAIKU_LIBS = -lbe -lmedia -ltranslation -ltracker -lshared -lroot -lpthread
 
-# Inject projectM-4 flags directly into CXXFLAGS
-CXXFLAGS += $(shell $(PKG_CONFIG_CMD) --cflags projectM-4)
 
 # Combine paths and libs
 LIBS = $(LIB_PATH) $(EXTRA_LIBS) $(HAIKU_LIBS)
@@ -59,15 +55,6 @@ LIBS = $(LIB_PATH) $(EXTRA_LIBS) $(HAIKU_LIBS)
 
 all: setup_dummy $(GUI_TARGET)
 
-# Dummy setup rule expanded to feed projectM both alias definitions
-setup_dummy:
-	@mkdir -p $(DUMMY_PC_PATH)
-	@if [ ! -f $(DUMMY_PC_PATH)/gl.pc ]; then \
-		printf "Name: gl\nDescription: Dummy GL for Haiku\nVersion: 1.0\nLibs: -lGL\n" > $(DUMMY_PC_PATH)/gl.pc; \
-	fi
-	@if [ ! -f $(DUMMY_PC_PATH)/opengl.pc ]; then \
-		printf "Name: opengl\nDescription: Dummy OpenGL for projectM verification\nVersion: 1.0\nLibs: -lGL\n" > $(DUMMY_PC_PATH)/opengl.pc; \
-	fi
 
 # Link the graphical desktop client binary
 $(GUI_TARGET): $(GUI_OBJS) $(GUI_RSRCS)
