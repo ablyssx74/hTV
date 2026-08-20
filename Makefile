@@ -1,7 +1,7 @@
 # hTV Build Script (Native Haiku OS Conversion)
 SHELL := /bin/bash
 GUI_TARGET = hTV
-VERSION = 1.0.5
+VERSION = 1.0.6
 PACKAGE_DIR := build/package
 DUMMY_PC_PATH := $(shell pwd)/build/pkgconfig
 
