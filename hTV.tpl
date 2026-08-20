@@ -1,5 +1,5 @@
 name			$(GUI_TARGET)
-version			$(VERSION)-1
+version			$(VERSION)-$(REVISION)
 architecture	$(ARCH)
 summary 		"hTV"
 description 	"hTV Player - Haiku SDL2 Neubla Supported Video Player"
@@ -12,12 +12,12 @@ copyrights {
 	"$(YEAR) ablyss"
 }
 provides {
-	$(GUI_TARGET) = $(VERSION)-1	
+	$(GUI_TARGET) = $(VERSION)-$(REVISION)
 }
 requires {
 	haiku
-	libsdl2
-	curl
+	libsdl2$(is32bit)
+	curl$(is32bit)
 }	
 urls {
 	"https://github.com/ablyssx74/hTV"
