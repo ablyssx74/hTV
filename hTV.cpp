@@ -146,12 +146,14 @@ int main(int argc, char* argv[]) {
     }
 
     if (hasHardwareDriver) {
-        mpv_set_option_string(ctx.mpv, "vo", "gpu");
+        mpv_set_option_string(ctx.mpv, "vo", "libmpv");
+        mpv_set_option_string(ctx.mpv, "hwdec", "yes"); 
     } else {
         mpv_set_option_string(ctx.mpv, "vo", "libmpv");
         mpv_set_option_string(ctx.mpv, "profile", "sw-fast");
+        mpv_set_option_string(ctx.mpv, "hwdec", "no"); 
     }
-    mpv_set_option_string(ctx.mpv, "hwdec", "no"); 
+
     mpv_set_option_string(ctx.mpv, "terminal", "no");
     mpv_set_option_string(ctx.mpv, "msg-level", "all=no");
     mpv_set_option_string(ctx.mpv, "osd-level", "1");
