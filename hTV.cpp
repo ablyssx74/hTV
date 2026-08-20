@@ -1,3 +1,8 @@
+/*
+ * Copyright 2026, Kris Beazley Cricket@epluribusunix.net
+ * All rights reserved. Distributed under the terms of the MIT license.
+ */
+ 
 #include <SDL2/SDL.h>
 #include <SDL2/SDL_opengl.h>
 #include <mpv/client.h>
@@ -70,7 +75,7 @@ void UpdatePlayerWindowTitle(PlayerCtx* ctx) {
 }
 
 int main(int argc, char* argv[]) {
-    setenv("BE_APP_SIGNATURE", "application/x-vnd.HaikuStreamPlayer", 1);
+    setenv("BE_APP_SIGNATURE", "application/x-vnd.hTV", 1);
 
     const char* streamUrl = "";
     if (argc > 1 && argv[1] != nullptr) {
@@ -212,18 +217,19 @@ int main(int argc, char* argv[]) {
     uint32_t lastTitleUpdate = 0;
     bool needsRender = false; 
 
-    {
-        const char* targetUrl = "https://githubusercontent.com";
-        const char* localVersion = "v1.0.3"; 
-        char updateCmd[1024];
-        snprintf(updateCmd, sizeof(updateCmd),
-            "(REMOTE_V=$(curl -sL \"%s\" | tr -d '\\r\\n'); "
-            "if [ ! -z \"$REMOTE_V\" ] && [ \"$REMOTE_V\" != \"%s\" ]; then "
-            "notify --title \"Update Available\" --group \"hTV\" "
-            "\"A newer version of hTV is available! ($REMOTE_V)\"; fi) &",
-            targetUrl, localVersion);	
-        system(updateCmd);
-    }
+	{
+	    const char* targetUrl = "https://raw.githubusercontent.com/ablyssx74/hTV/refs/heads/main/VERSION";
+	    const char* localVersion = "v1.0.4"; 
+	
+	    char updateCmd[1024];
+	    snprintf(updateCmd, sizeof(updateCmd),
+	        "(REMOTE_V=$(curl -sL \"%s\" | tr -d '\\r\\n'); "
+	        "if [ ! -z \"$REMOTE_V\" ] && [ \"$REMOTE_V\" != \"%s\" ]; then "
+	        "notify --title \"Update Available\" --group \"hTV\" "
+	        "\"A newer version of hTV is available! ($REMOTE_V)\"; fi) &",
+	        targetUrl, localVersion);	
+	    system(updateCmd);
+	}
 
     while (ctx.isRunning) {
         if (SDL_WaitEvent(&event)) {
