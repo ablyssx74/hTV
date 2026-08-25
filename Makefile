@@ -36,7 +36,7 @@ endif
 
 
 # --- Compiler & Linker Flags ---
-CXXFLAGS = -std=c++17 -O3 -Wall -rdynamic 
+CXXFLAGS = -std=c++17 -O3 -Wall
 INCLUDES = -I/boot/home/config/non-packaged/include -I/boot/system/develop/headers
 LIB_PATH = -L/boot/system/lib$(LIB_ARCH_DIR) -L/boot/system/develop/lib$(LIB_ARCH_DIR) -L/boot/home/config/non-packaged/lib$(LIB_ARCH_DIR) 
 
