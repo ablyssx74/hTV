@@ -1,4 +1,4 @@
-# Haiku SDL2 Audio/Video Player with nebula opengl support.
+# OpenGL Haiku SDL2 Audio/Video Player with nebula/llvm support.
 
 The only Haiku Video/Audio player ...
 1. That supports multi-threaded LLVM processes.  
