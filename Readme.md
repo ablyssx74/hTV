@@ -11,7 +11,7 @@ What does this do exactly?
 
 Audio Configuration
 1. Right click anywhere on the player to bring up the context menu, then choose "Config".
-2. The Config window has a 15-band graphic EQ (with Flat/Rock/Jazz/Bass Boost presets and a paired In/Threshold/Release limiter), plus Reverb (Room/Hall/Plate/Canyon) and a tunable Chorus (Rate/Depth/Mix) effect.
+2. The Config window has a 15-band graphic EQ (with Flat/Rock/Jazz/Bass Boost presets) paired with a compact In/Lmt/Rel limiter column sitting right next to the EQ bands, plus Reverb (Room/Hall/Plate/Canyon) and a tunable Chorus (Rate/Depth/Mix) effect -- both of the latter stay tucked away until you actually check "Enable Reverb"/"Enable Chorus", so the window doesn't reserve space for controls that aren't doing anything. Layout mirrors [HaikuSuperMusicThingy](https://github.com/ablyssx74/HaikuSuperMusicThingy)'s own EQ/limiter placement and abbreviations.
 3. Settings are saved as a flat BMessage to `hTV_settings` in your Haiku settings directory and reloaded automatically on the next launch.
 
 Playlist
