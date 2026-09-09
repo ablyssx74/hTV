@@ -959,7 +959,7 @@ int main(int argc, char* argv[]) {
 
 	{
 	    const char* targetUrl = "https://raw.githubusercontent.com/ablyssx74/hTV/refs/heads/main/VERSION";
-	    const char* localVersion = "v1.1.0";
+	    const char* localVersion = "v1.1.1";
 	
 	    char updateCmd[1024];
 	    snprintf(updateCmd, sizeof(updateCmd),
