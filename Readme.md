@@ -11,7 +11,7 @@ What does this do exactly?
 
 Audio Configuration
 1. Right click anywhere on the player to bring up the context menu, then choose "Config".
-2. The Config window has a 15-band graphic EQ (with Flat/Rock/Jazz/Bass Boost presets), plus Reverb (Room/Hall/Plate) and Chorus effects.
+2. The Config window has a 15-band graphic EQ (with Flat/Rock/Jazz/Bass Boost presets and a paired In/Threshold/Release limiter), plus Reverb (Room/Hall/Plate/Canyon) and a tunable Chorus (Rate/Depth/Mix) effect.
 3. Settings are saved as a flat BMessage to `hTV_settings` in your Haiku settings directory and reloaded automatically on the next launch.
 
 Make it your Default on Haiku
