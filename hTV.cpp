@@ -87,6 +87,9 @@ struct AudioConfig {
     float reverbWet = 30.0f;       // 0..100
 
     bool  chorusEnabled = false;
+    float chorusRate = 30.0f;   // 0..100
+    float chorusDepth = 40.0f;  // 0..100
+    float chorusMix = 50.0f;    // 0..100
 };
 
 static AudioConfig gAudioCfg;
@@ -173,7 +176,23 @@ static void BuildAudioFilterChain(BString& chain) {
     }
 
     if (gAudioCfg.chorusEnabled) {
-        chain << "chorus=0.6:0.9:55:0.4:0.25:2,";
+        // chorus=in_gain:out_gain:delays:decays:speeds:depths -- three
+        // slightly-detuned voices (the same base delay/decay spread as
+        // ffmpeg's own documented chorus example), with Rate/Depth/Mix
+        // scaling the modulation speed, modulation depth, and wet/dry
+        // balance respectively.
+        float rate  = 0.1f + (gAudioCfg.chorusRate / 100.0f) * 2.9f;   // 0.1..3.0 Hz
+        float depth = 1.0f + (gAudioCfg.chorusDepth / 100.0f) * 9.0f;  // 1..10 ms
+        float mix   = gAudioCfg.chorusMix / 100.0f;                    // 0..1
+        float inGain  = 0.5f + mix * 0.2f;
+        float outGain = 0.5f + mix * 0.4f;
+
+        BString chorus;
+        chorus.SetToFormat("chorus=%.2f:%.2f:55|60|40:0.4|0.32|0.3:%.2f|%.2f|%.2f:%.2f|%.2f|%.2f,",
+                            inGain, outGain,
+                            rate, rate * 1.15f, rate * 0.7f,
+                            depth, depth * 0.9f, depth * 1.1f);
+        chain << chorus;
     }
 
     if (chain.Length() > 0 && chain[chain.Length() - 1] == ',') {
@@ -212,6 +231,9 @@ static void SaveAudioConfig() {
     settings.AddFloat("reverb_damping", gAudioCfg.reverbDamping);
     settings.AddFloat("reverb_wet", gAudioCfg.reverbWet);
     settings.AddBool("chorus_enabled", gAudioCfg.chorusEnabled);
+    settings.AddFloat("chorus_rate", gAudioCfg.chorusRate);
+    settings.AddFloat("chorus_depth", gAudioCfg.chorusDepth);
+    settings.AddFloat("chorus_mix", gAudioCfg.chorusMix);
 
     ssize_t size = settings.FlattenedSize();
     char* buffer = new (std::nothrow) char[size];
@@ -233,6 +255,9 @@ static void LoadAudioConfig() {
     gAudioCfg.reverbDamping = 50.0f;
     gAudioCfg.reverbWet = 30.0f;
     gAudioCfg.chorusEnabled = false;
+    gAudioCfg.chorusRate = 30.0f;
+    gAudioCfg.chorusDepth = 40.0f;
+    gAudioCfg.chorusMix = 50.0f;
 
     BPath path;
     if (find_directory(B_USER_SETTINGS_DIRECTORY, &path) != B_OK) return;
@@ -258,6 +283,9 @@ static void LoadAudioConfig() {
     if (settings.FindFloat("reverb_damping", &valFloat) == B_OK) gAudioCfg.reverbDamping = valFloat;
     if (settings.FindFloat("reverb_wet", &valFloat) == B_OK) gAudioCfg.reverbWet = valFloat;
     if (settings.FindBool("chorus_enabled", &valBool) == B_OK) gAudioCfg.chorusEnabled = valBool;
+    if (settings.FindFloat("chorus_rate", &valFloat) == B_OK) gAudioCfg.chorusRate = valFloat;
+    if (settings.FindFloat("chorus_depth", &valFloat) == B_OK) gAudioCfg.chorusDepth = valFloat;
+    if (settings.FindFloat("chorus_mix", &valFloat) == B_OK) gAudioCfg.chorusMix = valFloat;
 }
 
 // A BSlider that also responds to the mouse wheel -- same small helper
@@ -299,7 +327,8 @@ enum {
     MSG_CFG_REVERB_TOGGLE  = 'cfrt',
     MSG_CFG_REVERB_TYPE    = 'cfry',
     MSG_CFG_REVERB_SLIDER  = 'cfrs',
-    MSG_CFG_CHORUS_TOGGLE  = 'cfch'
+    MSG_CFG_CHORUS_TOGGLE  = 'cfch',
+    MSG_CFG_CHORUS_SLIDER  = 'cfcs'
 };
 
 class ConfigWindow : public BWindow {
@@ -322,6 +351,9 @@ private:
     BSlider*    fWetSlider;
 
     BCheckBox*  fChorusToggle;
+    BSlider*    fChorusRateSlider;
+    BSlider*    fChorusDepthSlider;
+    BSlider*    fChorusMixSlider;
 };
 
 // Global handle to the (single) open Config window, so a second right-click
@@ -329,27 +361,40 @@ private:
 static ConfigWindow* gConfigWindow = nullptr;
 
 ConfigWindow::ConfigWindow()
-    : BWindow(BRect(120, 120, 120 + 680, 120 + 470), "hTV - Audio Configuration",
+    : BWindow(BRect(80, 60, 80 + 700, 60 + 400), "hTV - Audio Configuration",
               B_TITLED_WINDOW, B_NOT_ZOOMABLE | B_ASYNCHRONOUS_CONTROLS)
 {
-    // BWindow supports a BLayout directly (this is the same idiom
-    // HaikuSuperMusicThingy uses via BLayoutBuilder::Group<>(this, ...)):
-    // giving the window its own BGroupLayout lets every top-level child
-    // added below via AddChild() get properly sized and positioned. Without
-    // this, a freestanding BGroupView added as the window's child keeps its
-    // zero-size default frame and the window renders blank.
+    // A window's implicit top view defaults to plain white rather than the
+    // system panel color, while every native control below (BCheckBox,
+    // BSlider, BMenuField, ...) already paints itself using that theme
+    // color -- which is exactly why the empty space around them showed up
+    // stark white against the already-dark, theme-colored controls. Wrap
+    // everything in one BView explicitly tinted with the same system panel
+    // color, and give the window itself a trivial single-child layout that
+    // stretches that view to fill the whole window (the same technique
+    // HaikuSuperMusicThingy uses via BLayoutBuilder::Group<>(this, ...)
+    // with a single top-level child).
+    BView* background = new BView("config_background", B_WILL_DRAW);
+    background->SetViewColor(ui_color(B_PANEL_BACKGROUND_COLOR));
+    background->SetLowColor(ui_color(B_PANEL_BACKGROUND_COLOR));
+
+    BGroupLayout* windowLayout = new BGroupLayout(B_VERTICAL, 0);
+    windowLayout->SetInsets(0);
+    SetLayout(windowLayout);
+    AddChild(background);
+
     BGroupLayout* rootLayout = new BGroupLayout(B_VERTICAL, 10);
     rootLayout->SetInsets(14, 14, 14, 14);
-    SetLayout(rootLayout);
+    background->SetLayout(rootLayout);
 
     // ---- 15-Band EQ ----
     BStringView* eqTitle = new BStringView(NULL, "15-Band Equalizer");
     eqTitle->SetFont(be_bold_font);
-    AddChild(eqTitle);
+    background->AddChild(eqTitle);
 
     fEQToggle = new BCheckBox("eq_toggle", "Enable Equalizer", new BMessage(MSG_CFG_EQ_TOGGLE));
     fEQToggle->SetValue(gAudioCfg.eqEnabled ? B_CONTROL_ON : B_CONTROL_OFF);
-    AddChild(fEQToggle);
+    background->AddChild(fEQToggle);
 
     BPopUpMenu* presetMenu = new BPopUpMenu("Preset");
     const char* presetNames[] = { "Flat", "Rock", "Jazz", "Bass Boost" };
@@ -359,7 +404,7 @@ ConfigWindow::ConfigWindow()
         presetMenu->AddItem(new BMenuItem(presetNames[i], msg));
     }
     fPresetField = new BMenuField("preset_field", "Preset:", presetMenu);
-    AddChild(fPresetField);
+    background->AddChild(fPresetField);
 
     BGroupView* sliderRow = new BGroupView(B_HORIZONTAL, 4);
     for (int i = 0; i < 15; i++) {
@@ -384,16 +429,16 @@ ConfigWindow::ConfigWindow()
         bandGroup->AddChild(lbl);
         sliderRow->AddChild(bandGroup);
     }
-    AddChild(sliderRow);
+    background->AddChild(sliderRow);
 
     // ---- Reverb & FX ----
     BStringView* fxTitle = new BStringView(NULL, "Reverb & Effects");
     fxTitle->SetFont(be_bold_font);
-    AddChild(fxTitle);
+    background->AddChild(fxTitle);
 
     fReverbToggle = new BCheckBox("reverb_toggle", "Enable Reverb", new BMessage(MSG_CFG_REVERB_TOGGLE));
     fReverbToggle->SetValue(gAudioCfg.reverbEnabled ? B_CONTROL_ON : B_CONTROL_OFF);
-    AddChild(fReverbToggle);
+    background->AddChild(fReverbToggle);
 
     BPopUpMenu* reverbTypeMenu = new BPopUpMenu("Type");
     const char* reverbTypeNames[] = { "Room", "Hall", "Plate" };
@@ -404,29 +449,49 @@ ConfigWindow::ConfigWindow()
     }
     reverbTypeMenu->ItemAt(gAudioCfg.reverbType % 3)->SetMarked(true);
     fReverbTypeField = new BMenuField("reverb_type_field", "Type:", reverbTypeMenu);
-    AddChild(fReverbTypeField);
+    background->AddChild(fReverbTypeField);
 
     BMessage* roomMsg = new BMessage(MSG_CFG_REVERB_SLIDER);
     roomMsg->AddInt32("param", 0);
     fRoomSizeSlider = new WheelSlider("reverb_room", "Room Size", roomMsg, 0, 100, B_HORIZONTAL, 1);
     fRoomSizeSlider->SetValue((int32)gAudioCfg.reverbRoomSize);
-    AddChild(fRoomSizeSlider);
+    background->AddChild(fRoomSizeSlider);
 
     BMessage* dampMsg = new BMessage(MSG_CFG_REVERB_SLIDER);
     dampMsg->AddInt32("param", 1);
     fDampingSlider = new WheelSlider("reverb_damp", "Damping", dampMsg, 0, 100, B_HORIZONTAL, 1);
     fDampingSlider->SetValue((int32)gAudioCfg.reverbDamping);
-    AddChild(fDampingSlider);
+    background->AddChild(fDampingSlider);
 
     BMessage* wetMsg = new BMessage(MSG_CFG_REVERB_SLIDER);
     wetMsg->AddInt32("param", 2);
     fWetSlider = new WheelSlider("reverb_wet", "Wet Level", wetMsg, 0, 100, B_HORIZONTAL, 1);
     fWetSlider->SetValue((int32)gAudioCfg.reverbWet);
-    AddChild(fWetSlider);
+    background->AddChild(fWetSlider);
 
     fChorusToggle = new BCheckBox("chorus_toggle", "Enable Chorus", new BMessage(MSG_CFG_CHORUS_TOGGLE));
     fChorusToggle->SetValue(gAudioCfg.chorusEnabled ? B_CONTROL_ON : B_CONTROL_OFF);
-    AddChild(fChorusToggle);
+    background->AddChild(fChorusToggle);
+
+    // Chorus gets the same dynamic Rate/Depth/Mix sliders Reverb has,
+    // instead of being a fixed-parameter on/off toggle.
+    BMessage* chorusRateMsg = new BMessage(MSG_CFG_CHORUS_SLIDER);
+    chorusRateMsg->AddInt32("param", 0);
+    fChorusRateSlider = new WheelSlider("chorus_rate", "Rate", chorusRateMsg, 0, 100, B_HORIZONTAL, 1);
+    fChorusRateSlider->SetValue((int32)gAudioCfg.chorusRate);
+    background->AddChild(fChorusRateSlider);
+
+    BMessage* chorusDepthMsg = new BMessage(MSG_CFG_CHORUS_SLIDER);
+    chorusDepthMsg->AddInt32("param", 1);
+    fChorusDepthSlider = new WheelSlider("chorus_depth", "Depth", chorusDepthMsg, 0, 100, B_HORIZONTAL, 1);
+    fChorusDepthSlider->SetValue((int32)gAudioCfg.chorusDepth);
+    background->AddChild(fChorusDepthSlider);
+
+    BMessage* chorusMixMsg = new BMessage(MSG_CFG_CHORUS_SLIDER);
+    chorusMixMsg->AddInt32("param", 2);
+    fChorusMixSlider = new WheelSlider("chorus_mix", "Mix", chorusMixMsg, 0, 100, B_HORIZONTAL, 1);
+    fChorusMixSlider->SetValue((int32)gAudioCfg.chorusMix);
+    background->AddChild(fChorusMixSlider);
 
     // Route every control's message to this window.
     fEQToggle->SetTarget(this);
@@ -438,7 +503,15 @@ ConfigWindow::ConfigWindow()
     fDampingSlider->SetTarget(this);
     fWetSlider->SetTarget(this);
     fChorusToggle->SetTarget(this);
+    fChorusRateSlider->SetTarget(this);
+    fChorusDepthSlider->SetTarget(this);
+    fChorusMixSlider->SetTarget(this);
 
+    // Grow the window to fit everything (15 vertical EQ sliders plus the
+    // reverb/chorus rows need more room than a fixed guess reliably gives),
+    // then center it on screen.
+    BSize preferred = background->PreferredSize();
+    ResizeTo(preferred.Width(), preferred.Height());
     CenterOnScreen();
 }
 
@@ -514,6 +587,19 @@ void ConfigWindow::MessageReceived(BMessage* message) {
         }
         case MSG_CFG_CHORUS_TOGGLE: {
             gAudioCfg.chorusEnabled = (fChorusToggle->Value() == B_CONTROL_ON);
+            ApplyAudioFilters(g_mpv);
+            SaveAudioConfig();
+            break;
+        }
+        case MSG_CFG_CHORUS_SLIDER: {
+            int32 param = 0;
+            message->FindInt32("param", &param);
+            switch (param) {
+                case 0: gAudioCfg.chorusRate  = (float)fChorusRateSlider->Value(); break;
+                case 1: gAudioCfg.chorusDepth = (float)fChorusDepthSlider->Value(); break;
+                case 2: gAudioCfg.chorusMix   = (float)fChorusMixSlider->Value(); break;
+                default: break;
+            }
             ApplyAudioFilters(g_mpv);
             SaveAudioConfig();
             break;
