@@ -1011,20 +1011,25 @@ void ConfigWindow::MessageReceived(BMessage* message) {
             ResizeToPreferred();
 
             if (show) {
-                // Re-populating on open (rather than only at
-                // construction/folder-pick time) didn't fix the empty
-                // rendering on real hardware, so this is a geometry/
-                // render question now, not a data-population or timing
-                // one. Dump the widget's own state directly instead of
-                // guessing a third time -- queried after
-                // InvalidateLayout()/ResizeToPreferred() above so this
-                // reflects the settled layout, not a stale pre-resize one.
-                // A degenerate (near-zero) Bounds() here would confirm a
-                // layout/sizing cause; a normal-looking Bounds() with
-                // CountItems() > 0 would instead point at drawing/color.
-                // Run from Terminal to see this.
-                BRect listBounds = fPlaylistList->Bounds();
+                // Confirmed on real hardware: fPlaylistScroll's own
+                // Bounds() comes back correctly sized once the window
+                // settles (585x120), but fPlaylistList's Bounds() was
+                // still (0,0,-1,-1) -- Haiku's canonical "invalid/
+                // zero-size rect" (right < left). BScrollView resolves
+                // its own size through the layout system fine, but isn't
+                // propagating that down to a target that was never given
+                // an explicit frame before being wrapped -- so force the
+                // sync directly instead of relying on whatever internal
+                // mechanism isn't firing for this target.
                 BRect scrollBounds = fPlaylistScroll->Bounds();
+                if (scrollBounds.IsValid()) {
+                    fPlaylistList->ResizeTo(scrollBounds.Width(), scrollBounds.Height());
+                }
+                fPlaylistList->Invalidate();
+
+                // Diagnostic kept for one more round to confirm the fix
+                // actually closed the gap between these two Bounds().
+                BRect listBounds = fPlaylistList->Bounds();
                 BRect scrollFrame = fPlaylistScroll->Frame();
                 fprintf(stderr, "[hTV] Playlist list: %d items, "
                     "list Bounds=(%.0f,%.0f,%.0f,%.0f), "
@@ -1339,7 +1344,7 @@ int main(int argc, char* argv[]) {
 
 	{
 	    const char* targetUrl = "https://raw.githubusercontent.com/ablyssx74/hTV/refs/heads/main/VERSION";
-	    const char* localVersion = "v1.2.3";
+	    const char* localVersion = "v1.2.4";
 	
 	    char updateCmd[1024];
 	    snprintf(updateCmd, sizeof(updateCmd),
