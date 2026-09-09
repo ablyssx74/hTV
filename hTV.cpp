@@ -12,6 +12,33 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <new>
+
+// Native Haiku (Be API) interface kit -- used for the right-click "Config"
+// popup menu and the Audio Configuration window (15-band EQ / reverb / FX).
+// SDL already brings up a BApplication under the hood on Haiku, so it's
+// safe to create additional BWindows/BPopUpMenus from application code.
+#include <Application.h>
+#include <Window.h>
+#include <View.h>
+#include <GroupView.h>
+#include <GroupLayout.h>
+#include <StringView.h>
+#include <CheckBox.h>
+#include <Slider.h>
+#include <MenuField.h>
+#include <PopUpMenu.h>
+#include <MenuItem.h>
+#include <Message.h>
+#include <String.h>
+#include <File.h>
+#include <FindDirectory.h>
+#include <Path.h>
+#include <InterfaceDefs.h>
+#include <Font.h>
+#include <Rect.h>
+#include <Point.h>
+#include <Size.h>
 
 // Unified state tracker containing both graphics backend slots
 struct PlayerCtx {
@@ -26,6 +53,503 @@ struct PlayerCtx {
     char currentTitle[512]; 
     int texWidth, texHeight;
 };
+
+// =============================================================================
+// AUDIO CONFIGURATION -- 15-Band EQ, Reverb & FX
+// =============================================================================
+// This mirrors the 15-band graphic EQ found in ablyss's HaikuSuperMusicThingy
+// (https://github.com/ablyssx74/HaikuSuperMusicThingy) -- same 15 ISO-ish
+// band centers, same +/-15dB range, same "equalizer=f=..:width_type=o:w=1:g=.."
+// mpv/ffmpeg filter chain construction -- but settings are persisted using a
+// flat BMessage (Flatten()/Unflatten() to a single settings file), the same
+// technique hDesktop uses (https://github.com/ablyssx74/hDesktop), instead of
+// HaikuSuperMusicThingy's JSON config file.
+//
+// mpv/ffmpeg has no dedicated "reverb" audio filter, so the Reverb section
+// below builds a tuned ffmpeg `aecho` chain -- the technique mpv's own manual
+// recommends for adding echo/reverb-style ambience -- with Room/Hall/Plate
+// presets, plus a simple `chorus` filter as an extra bonus effect.
+
+// mpv client handle shared with the audio-config UI thread. libmpv's client
+// API (mpv_set_property_string etc.) is documented as thread-safe, so the
+// ConfigWindow (which runs on its own BWindow looper thread) can push filter
+// changes directly without any extra locking.
+static mpv_handle* g_mpv = nullptr;
+
+struct AudioConfig {
+    bool  eqEnabled = false;
+    float eqBands[15] = {0.0f};
+
+    bool  reverbEnabled = false;
+    int32 reverbType = 0;          // 0 = Room, 1 = Hall, 2 = Plate
+    float reverbRoomSize = 50.0f;  // 0..100
+    float reverbDamping = 50.0f;   // 0..100
+    float reverbWet = 30.0f;       // 0..100
+
+    bool  chorusEnabled = false;
+};
+
+static AudioConfig gAudioCfg;
+
+// 15-band frequency centers, identical to HaikuSuperMusicThingy's mbeq_1197
+// compatible layout.
+static const float kEqFrequencies[15] = {
+    50, 100, 156, 220, 311, 440, 622, 880,
+    1250, 1750, 2500, 3500, 5000, 10000, 20000
+};
+
+static const char* kEqFreqLabels[15] = {
+    "50", "100", "156", "220", "311", "440", "622", "880",
+    "1k2", "1k7", "2k5", "3k5", "5k", "10k", "20k"
+};
+
+// EQ curve presets, matching the ones shipped with HaikuSuperMusicThingy.
+static const float kEqPresetFlat[15] = {
+    0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+    0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0
+};
+static const float kEqPresetRock[15] = {
+    4.0, 3.5, 3.0, 2.5, 2.0, 1.0, -1.0, -1.0,
+    0.0, 1.0, 1.5, 2.0, 2.5, 3.5, 4.0
+};
+static const float kEqPresetJazz[15] = {
+    3.0, 2.5, 2.0, 1.5, 1.0, 2.0, -1.0, -1.0,
+    -0.5, 0.0, 0.5, 1.0, 1.5, 2.5, 3.0
+};
+static const float kEqPresetBass[15] = {
+    11.0, 9.0, 4.0, 2.0, 1.0, 1.0, 0.0, 0.0,
+    0.0, 0.0, 1.0, 3.0, 4.0, 7.0, 9.0
+};
+
+static const char* kSettingsFileName = "hTV_settings";
+
+// Builds the full mpv `af` filter-chain string from the current AudioConfig.
+static void BuildAudioFilterChain(BString& chain) {
+    chain = "";
+
+    if (gAudioCfg.eqEnabled) {
+        for (int i = 0; i < 15; i++) {
+            BString band;
+            band.SetToFormat("equalizer=f=%.0f:width_type=o:w=1:g=%.2f,",
+                              kEqFrequencies[i], gAudioCfg.eqBands[i]);
+            chain << band;
+        }
+    }
+
+    if (gAudioCfg.reverbEnabled) {
+        // aecho=in_gain:out_gain:delays:decays
+        // "Room size" scales the tap delays, "damping" trims the decay of
+        // each successive tap (simulating high-frequency absorption), and
+        // "wet level" blends the reverb signal in/out.
+        float wet   = gAudioCfg.reverbWet / 100.0f;      // 0..1
+        float damp  = gAudioCfg.reverbDamping / 100.0f;  // 0..1
+        float roomScale = 0.5f + (gAudioCfg.reverbRoomSize / 100.0f) * 1.5f; // 0.5x..2.0x
+
+        struct ReverbProfile { float delayMs[3]; float decay[3]; };
+        static const ReverbProfile kProfiles[3] = {
+            { {60.0f, 100.0f, 150.0f}, {0.35f, 0.25f, 0.15f} },  // Room
+            { {150.0f, 220.0f, 340.0f}, {0.55f, 0.45f, 0.30f} }, // Hall
+            { {30.0f, 55.0f, 90.0f},   {0.45f, 0.35f, 0.25f} }   // Plate
+        };
+        const ReverbProfile& profile = kProfiles[gAudioCfg.reverbType % 3];
+
+        BString delays, decays;
+        for (int i = 0; i < 3; i++) {
+            BString d, g;
+            d.SetToFormat("%.0f", profile.delayMs[i] * roomScale);
+            g.SetToFormat("%.3f", profile.decay[i] * (1.0f - damp * 0.6f));
+            if (i > 0) { delays << "|"; decays << "|"; }
+            delays << d;
+            decays << g;
+        }
+
+        float inGain  = 0.6f + wet * 0.3f;
+        float outGain = 0.5f + wet * 0.5f;
+
+        BString reverb;
+        reverb.SetToFormat("aecho=%.2f:%.2f:%s:%s,", inGain, outGain,
+                            delays.String(), decays.String());
+        chain << reverb;
+    }
+
+    if (gAudioCfg.chorusEnabled) {
+        chain << "chorus=0.6:0.9:55:0.4:0.25:2,";
+    }
+
+    if (chain.Length() > 0 && chain[chain.Length() - 1] == ',') {
+        chain.Truncate(chain.Length() - 1);
+    }
+}
+
+// Pushes the current AudioConfig to mpv as the "af" audio filter chain.
+static void ApplyAudioFilters(mpv_handle* mpv) {
+    if (!mpv) return;
+    BString chain;
+    BuildAudioFilterChain(chain);
+    mpv_set_property_string(mpv, "af", chain.String());
+}
+
+// Persists gAudioCfg to a single flat BMessage on disk, the same way
+// hDesktop flattens its settings BMessage straight to a BFile (repeated
+// fields, e.g. "eq_band" x15, follow the same pattern hDesktop uses for its
+// repeated "favorite_path" entries).
+static void SaveAudioConfig() {
+    BPath path;
+    if (find_directory(B_USER_SETTINGS_DIRECTORY, &path) != B_OK) return;
+    path.Append(kSettingsFileName);
+
+    BFile file(path.Path(), B_WRITE_ONLY | B_CREATE_FILE | B_ERASE_FILE);
+    if (file.InitCheck() != B_OK) return;
+
+    BMessage settings;
+    settings.AddBool("eq_enabled", gAudioCfg.eqEnabled);
+    for (int i = 0; i < 15; i++) {
+        settings.AddFloat("eq_band", gAudioCfg.eqBands[i]);
+    }
+    settings.AddBool("reverb_enabled", gAudioCfg.reverbEnabled);
+    settings.AddInt32("reverb_type", gAudioCfg.reverbType);
+    settings.AddFloat("reverb_room_size", gAudioCfg.reverbRoomSize);
+    settings.AddFloat("reverb_damping", gAudioCfg.reverbDamping);
+    settings.AddFloat("reverb_wet", gAudioCfg.reverbWet);
+    settings.AddBool("chorus_enabled", gAudioCfg.chorusEnabled);
+
+    ssize_t size = settings.FlattenedSize();
+    char* buffer = new (std::nothrow) char[size];
+    if (buffer != nullptr) {
+        if (settings.Flatten(buffer, size) == B_OK) {
+            file.Write(buffer, size);
+        }
+        delete[] buffer;
+    }
+}
+
+// Loads gAudioCfg from disk, falling back to safe defaults on any failure.
+static void LoadAudioConfig() {
+    gAudioCfg.eqEnabled = false;
+    for (int i = 0; i < 15; i++) gAudioCfg.eqBands[i] = 0.0f;
+    gAudioCfg.reverbEnabled = false;
+    gAudioCfg.reverbType = 0;
+    gAudioCfg.reverbRoomSize = 50.0f;
+    gAudioCfg.reverbDamping = 50.0f;
+    gAudioCfg.reverbWet = 30.0f;
+    gAudioCfg.chorusEnabled = false;
+
+    BPath path;
+    if (find_directory(B_USER_SETTINGS_DIRECTORY, &path) != B_OK) return;
+    path.Append(kSettingsFileName);
+
+    BFile file(path.Path(), B_READ_ONLY);
+    if (file.InitCheck() != B_OK) return;
+
+    BMessage settings;
+    if (settings.Unflatten(&file) != B_OK) return;
+
+    bool valBool;
+    float valFloat;
+    int32 valInt32;
+
+    if (settings.FindBool("eq_enabled", &valBool) == B_OK) gAudioCfg.eqEnabled = valBool;
+    for (int i = 0; i < 15; i++) {
+        if (settings.FindFloat("eq_band", i, &valFloat) == B_OK) gAudioCfg.eqBands[i] = valFloat;
+    }
+    if (settings.FindBool("reverb_enabled", &valBool) == B_OK) gAudioCfg.reverbEnabled = valBool;
+    if (settings.FindInt32("reverb_type", &valInt32) == B_OK) gAudioCfg.reverbType = valInt32;
+    if (settings.FindFloat("reverb_room_size", &valFloat) == B_OK) gAudioCfg.reverbRoomSize = valFloat;
+    if (settings.FindFloat("reverb_damping", &valFloat) == B_OK) gAudioCfg.reverbDamping = valFloat;
+    if (settings.FindFloat("reverb_wet", &valFloat) == B_OK) gAudioCfg.reverbWet = valFloat;
+    if (settings.FindBool("chorus_enabled", &valBool) == B_OK) gAudioCfg.chorusEnabled = valBool;
+}
+
+// A BSlider that also responds to the mouse wheel -- same small helper
+// HaikuSuperMusicThingy uses for its EQ sliders.
+class WheelSlider : public BSlider {
+public:
+    WheelSlider(const char* name, const char* label, BMessage* msg,
+                int32 min, int32 max, orientation orient, int32 multiplier = 1)
+        : BSlider(name, label, msg, min, max, orient),
+          fMultiplier(multiplier) {}
+
+    virtual void MessageReceived(BMessage* msg) {
+        if (msg->what == B_MOUSE_WHEEL_CHANGED) {
+            float dy;
+            if (msg->FindFloat("be:wheel_delta_y", &dy) == B_OK) {
+                int32 min, max;
+                GetLimits(&min, &max);
+
+                int32 newValue = Value() - (int32)(dy * fMultiplier);
+                if (newValue < min) newValue = min;
+                if (newValue > max) newValue = max;
+
+                SetValue(newValue);
+                Invoke();
+            }
+        } else {
+            BSlider::MessageReceived(msg);
+        }
+    }
+
+private:
+    int32 fMultiplier;
+};
+
+enum {
+    MSG_CFG_EQ_TOGGLE      = 'cfeq',
+    MSG_CFG_EQ_SLIDER      = 'cfes',
+    MSG_CFG_PRESET_SELECT  = 'cfps',
+    MSG_CFG_REVERB_TOGGLE  = 'cfrt',
+    MSG_CFG_REVERB_TYPE    = 'cfry',
+    MSG_CFG_REVERB_SLIDER  = 'cfrs',
+    MSG_CFG_CHORUS_TOGGLE  = 'cfch'
+};
+
+class ConfigWindow : public BWindow {
+public:
+    ConfigWindow();
+    virtual void MessageReceived(BMessage* message);
+    virtual bool QuitRequested();
+
+private:
+    void _ApplyPreset(const float* values);
+
+    BCheckBox*  fEQToggle;
+    BSlider*    fEQSliders[15];
+    BMenuField* fPresetField;
+
+    BCheckBox*  fReverbToggle;
+    BMenuField* fReverbTypeField;
+    BSlider*    fRoomSizeSlider;
+    BSlider*    fDampingSlider;
+    BSlider*    fWetSlider;
+
+    BCheckBox*  fChorusToggle;
+};
+
+// Global handle to the (single) open Config window, so a second right-click
+// activates the existing window instead of spawning duplicates.
+static ConfigWindow* gConfigWindow = nullptr;
+
+ConfigWindow::ConfigWindow()
+    : BWindow(BRect(120, 120, 120 + 680, 120 + 470), "hTV - Audio Configuration",
+              B_TITLED_WINDOW, B_NOT_ZOOMABLE | B_ASYNCHRONOUS_CONTROLS)
+{
+    BGroupView* root = new BGroupView(B_VERTICAL, 10);
+    root->GroupLayout()->SetInsets(14, 14, 14, 14);
+    AddChild(root);
+
+    // ---- 15-Band EQ ----
+    BStringView* eqTitle = new BStringView(NULL, "15-Band Equalizer");
+    eqTitle->SetFont(be_bold_font);
+    root->AddChild(eqTitle);
+
+    fEQToggle = new BCheckBox("eq_toggle", "Enable Equalizer", new BMessage(MSG_CFG_EQ_TOGGLE));
+    fEQToggle->SetValue(gAudioCfg.eqEnabled ? B_CONTROL_ON : B_CONTROL_OFF);
+    root->AddChild(fEQToggle);
+
+    BPopUpMenu* presetMenu = new BPopUpMenu("Preset");
+    const char* presetNames[] = { "Flat", "Rock", "Jazz", "Bass Boost" };
+    for (int i = 0; i < 4; i++) {
+        BMessage* msg = new BMessage(MSG_CFG_PRESET_SELECT);
+        msg->AddInt32("preset", i);
+        presetMenu->AddItem(new BMenuItem(presetNames[i], msg));
+    }
+    fPresetField = new BMenuField("preset_field", "Preset:", presetMenu);
+    root->AddChild(fPresetField);
+
+    BGroupView* sliderRow = new BGroupView(B_HORIZONTAL, 4);
+    for (int i = 0; i < 15; i++) {
+        BGroupView* bandGroup = new BGroupView(B_VERTICAL, 2);
+
+        BMessage* sliderMsg = new BMessage(MSG_CFG_EQ_SLIDER);
+        sliderMsg->AddInt32("band", i);
+
+        BString sliderName;
+        sliderName.SetToFormat("eq_band_%d", i);
+        fEQSliders[i] = new WheelSlider(sliderName.String(), "", sliderMsg, -15, 15, B_VERTICAL, 1);
+        fEQSliders[i]->SetValue((int32)gAudioCfg.eqBands[i]);
+        fEQSliders[i]->SetHashMarks(B_HASH_MARKS_LEFT);
+        fEQSliders[i]->SetHashMarkCount(7);
+        fEQSliders[i]->SetExplicitMinSize(BSize(28, 140));
+
+        BStringView* lbl = new BStringView(NULL, kEqFreqLabels[i]);
+        lbl->SetFontSize(9);
+        lbl->SetExplicitAlignment(BAlignment(B_ALIGN_CENTER, B_ALIGN_VERTICAL_UNSET));
+
+        bandGroup->AddChild(fEQSliders[i]);
+        bandGroup->AddChild(lbl);
+        sliderRow->AddChild(bandGroup);
+    }
+    root->AddChild(sliderRow);
+
+    // ---- Reverb & FX ----
+    BStringView* fxTitle = new BStringView(NULL, "Reverb & Effects");
+    fxTitle->SetFont(be_bold_font);
+    root->AddChild(fxTitle);
+
+    fReverbToggle = new BCheckBox("reverb_toggle", "Enable Reverb", new BMessage(MSG_CFG_REVERB_TOGGLE));
+    fReverbToggle->SetValue(gAudioCfg.reverbEnabled ? B_CONTROL_ON : B_CONTROL_OFF);
+    root->AddChild(fReverbToggle);
+
+    BPopUpMenu* reverbTypeMenu = new BPopUpMenu("Type");
+    const char* reverbTypeNames[] = { "Room", "Hall", "Plate" };
+    for (int i = 0; i < 3; i++) {
+        BMessage* msg = new BMessage(MSG_CFG_REVERB_TYPE);
+        msg->AddInt32("type", i);
+        reverbTypeMenu->AddItem(new BMenuItem(reverbTypeNames[i], msg));
+    }
+    reverbTypeMenu->ItemAt(gAudioCfg.reverbType % 3)->SetMarked(true);
+    fReverbTypeField = new BMenuField("reverb_type_field", "Type:", reverbTypeMenu);
+    root->AddChild(fReverbTypeField);
+
+    BMessage* roomMsg = new BMessage(MSG_CFG_REVERB_SLIDER);
+    roomMsg->AddInt32("param", 0);
+    fRoomSizeSlider = new WheelSlider("reverb_room", "Room Size", roomMsg, 0, 100, B_HORIZONTAL, 1);
+    fRoomSizeSlider->SetValue((int32)gAudioCfg.reverbRoomSize);
+    root->AddChild(fRoomSizeSlider);
+
+    BMessage* dampMsg = new BMessage(MSG_CFG_REVERB_SLIDER);
+    dampMsg->AddInt32("param", 1);
+    fDampingSlider = new WheelSlider("reverb_damp", "Damping", dampMsg, 0, 100, B_HORIZONTAL, 1);
+    fDampingSlider->SetValue((int32)gAudioCfg.reverbDamping);
+    root->AddChild(fDampingSlider);
+
+    BMessage* wetMsg = new BMessage(MSG_CFG_REVERB_SLIDER);
+    wetMsg->AddInt32("param", 2);
+    fWetSlider = new WheelSlider("reverb_wet", "Wet Level", wetMsg, 0, 100, B_HORIZONTAL, 1);
+    fWetSlider->SetValue((int32)gAudioCfg.reverbWet);
+    root->AddChild(fWetSlider);
+
+    fChorusToggle = new BCheckBox("chorus_toggle", "Enable Chorus", new BMessage(MSG_CFG_CHORUS_TOGGLE));
+    fChorusToggle->SetValue(gAudioCfg.chorusEnabled ? B_CONTROL_ON : B_CONTROL_OFF);
+    root->AddChild(fChorusToggle);
+
+    // Route every control's message to this window.
+    fEQToggle->SetTarget(this);
+    presetMenu->SetTargetForItems(this);
+    for (int i = 0; i < 15; i++) fEQSliders[i]->SetTarget(this);
+    fReverbToggle->SetTarget(this);
+    reverbTypeMenu->SetTargetForItems(this);
+    fRoomSizeSlider->SetTarget(this);
+    fDampingSlider->SetTarget(this);
+    fWetSlider->SetTarget(this);
+    fChorusToggle->SetTarget(this);
+
+    CenterOnScreen();
+}
+
+void ConfigWindow::_ApplyPreset(const float* values) {
+    for (int i = 0; i < 15; i++) {
+        gAudioCfg.eqBands[i] = values[i];
+        fEQSliders[i]->SetValue((int32)values[i]);
+    }
+    if (!gAudioCfg.eqEnabled) {
+        gAudioCfg.eqEnabled = true;
+        fEQToggle->SetValue(B_CONTROL_ON);
+    }
+    ApplyAudioFilters(g_mpv);
+    SaveAudioConfig();
+}
+
+void ConfigWindow::MessageReceived(BMessage* message) {
+    switch (message->what) {
+        case MSG_CFG_EQ_TOGGLE: {
+            gAudioCfg.eqEnabled = (fEQToggle->Value() == B_CONTROL_ON);
+            ApplyAudioFilters(g_mpv);
+            SaveAudioConfig();
+            break;
+        }
+        case MSG_CFG_EQ_SLIDER: {
+            int32 band = 0;
+            if (message->FindInt32("band", &band) == B_OK && band >= 0 && band < 15) {
+                gAudioCfg.eqBands[band] = (float)fEQSliders[band]->Value();
+            }
+            ApplyAudioFilters(g_mpv);
+            SaveAudioConfig();
+            break;
+        }
+        case MSG_CFG_PRESET_SELECT: {
+            int32 preset = 0;
+            if (message->FindInt32("preset", &preset) == B_OK) {
+                switch (preset) {
+                    case 1:  _ApplyPreset(kEqPresetRock); break;
+                    case 2:  _ApplyPreset(kEqPresetJazz); break;
+                    case 3:  _ApplyPreset(kEqPresetBass); break;
+                    default: _ApplyPreset(kEqPresetFlat); break;
+                }
+            }
+            break;
+        }
+        case MSG_CFG_REVERB_TOGGLE: {
+            gAudioCfg.reverbEnabled = (fReverbToggle->Value() == B_CONTROL_ON);
+            ApplyAudioFilters(g_mpv);
+            SaveAudioConfig();
+            break;
+        }
+        case MSG_CFG_REVERB_TYPE: {
+            int32 type = 0;
+            if (message->FindInt32("type", &type) == B_OK) {
+                gAudioCfg.reverbType = type;
+                ApplyAudioFilters(g_mpv);
+                SaveAudioConfig();
+            }
+            break;
+        }
+        case MSG_CFG_REVERB_SLIDER: {
+            int32 param = 0;
+            message->FindInt32("param", &param);
+            switch (param) {
+                case 0: gAudioCfg.reverbRoomSize = (float)fRoomSizeSlider->Value(); break;
+                case 1: gAudioCfg.reverbDamping  = (float)fDampingSlider->Value(); break;
+                case 2: gAudioCfg.reverbWet      = (float)fWetSlider->Value(); break;
+                default: break;
+            }
+            ApplyAudioFilters(g_mpv);
+            SaveAudioConfig();
+            break;
+        }
+        case MSG_CFG_CHORUS_TOGGLE: {
+            gAudioCfg.chorusEnabled = (fChorusToggle->Value() == B_CONTROL_ON);
+            ApplyAudioFilters(g_mpv);
+            SaveAudioConfig();
+            break;
+        }
+        default:
+            BWindow::MessageReceived(message);
+            break;
+    }
+}
+
+bool ConfigWindow::QuitRequested() {
+    SaveAudioConfig();
+    gConfigWindow = nullptr;
+    return true;
+}
+
+// Shows the Config window, or activates it if it's already open.
+static void ShowConfigWindow() {
+    if (gConfigWindow != nullptr) {
+        if (gConfigWindow->IsHidden()) gConfigWindow->Show();
+        gConfigWindow->Activate();
+        return;
+    }
+    gConfigWindow = new ConfigWindow();
+    gConfigWindow->Show();
+}
+
+// Builds and runs the right-click "apps screen" popup menu. `screenPoint`
+// must be in screen coordinates. This is the classic "pop-up menu without
+// a window" pattern: BPopUpMenu::Go() blocks the calling thread and returns
+// the selected item directly, so it can be called from the SDL main loop's
+// thread without needing a BLooper of its own.
+static void ShowMainContextMenu(BPoint screenPoint) {
+    BPopUpMenu* contextMenu = new BPopUpMenu("hTVContextMenu", false, false);
+    contextMenu->AddItem(new BMenuItem("Config", nullptr));
+
+    BMenuItem* selected = contextMenu->Go(screenPoint);
+    if (selected != nullptr) {
+        ShowConfigWindow();
+    }
+    delete contextMenu;
+}
 
 // Wake up the main loop on a new video frame arrival
 void on_mpv_render_update(void* ctx) {
@@ -149,6 +673,8 @@ int main(int argc, char* argv[]) {
         fprintf(stderr, "Failed to create mpv handle instance\n");
         return 1;
     }
+    g_mpv = ctx.mpv;
+    LoadAudioConfig();
 
     if (hasHardwareDriver) {
         mpv_set_option_string(ctx.mpv, "vo", "libmpv");
@@ -209,6 +735,9 @@ int main(int argc, char* argv[]) {
     }
 
     mpv_render_context_set_update_callback(ctx.mpvRender, on_mpv_render_update, nullptr);
+
+    // Push any EQ/reverb/FX settings restored from disk before playback starts.
+    ApplyAudioFilters(ctx.mpv);
 
     printf("[DEBUG] Launching source feed stream target: %s\n", streamUrl);
     const char* loadCmd[] = {"loadfile", streamUrl, nullptr};
@@ -297,6 +826,11 @@ int main(int argc, char* argv[]) {
                         SDL_ShowCursor(ctx.isFullscreen ? SDL_DISABLE : SDL_ENABLE);
                     } else if (event.button.button == SDL_BUTTON_MIDDLE) {
                         mpv_command_string(ctx.mpv, "cycle mute");
+                    } else if (event.button.button == SDL_BUTTON_RIGHT) {
+                        int windowX = 0, windowY = 0;
+                        SDL_GetWindowPosition(ctx.window, &windowX, &windowY);
+                        BPoint screenPoint(windowX + event.button.x, windowY + event.button.y);
+                        ShowMainContextMenu(screenPoint);
                     }
                     break;
                 }
@@ -396,6 +930,11 @@ int main(int argc, char* argv[]) {
             }
             needsRender = false; 
         }
+    }
+
+    if (gConfigWindow != nullptr) {
+        if (gConfigWindow->Lock()) gConfigWindow->Quit();
+        gConfigWindow = nullptr;
     }
 
     if (ctx.texture) SDL_DestroyTexture(ctx.texture);
