@@ -394,34 +394,72 @@ static std::vector<std::string> gPlaylistFullPaths;
 
 // (Re)scans folderPath (non-recursive -- a playlist folder, not a nested
 // preset library) for playable files and repopulates list + gPlaylistFullPaths
-// to match, sorted by filename.
+// to match, sorted by filename. Logs a one-line summary to stderr either
+// way (run hTV from Terminal to see it) -- the first version of this
+// silently produced an empty list on real hardware with no clue why, so
+// this diagnostic stays rather than getting stripped out once it's
+// confirmed working, the same reasoning hrecord's own diagnostics use.
 static void PopulatePlaylistList(BListView* list, const std::string& folderPath) {
     list->MakeEmpty();
     gPlaylistFullPaths.clear();
     if (folderPath.empty()) return;
 
     std::error_code ec;
-    if (!std::filesystem::exists(folderPath, ec) || ec) return;
+    if (!std::filesystem::exists(folderPath, ec) || ec) {
+        fprintf(stderr, "[hTV] Playlist folder \"%s\" doesn't exist or isn't reachable "
+            "(error: %s)\n", folderPath.c_str(), ec.message().c_str());
+        return;
+    }
 
-    // Same try/catch guard load_random_preset uses around its own
-    // recursive_directory_iterator -- a permission error or a symlink
-    // dangling mid-scan throws filesystem_error even with the
-    // error_code-taking constructor, since range-based for always calls
-    // the throwing operator++().
+    int totalEntries = 0, statErrors = 0, notRegularFiles = 0, wrongExtension = 0;
     std::vector<std::filesystem::directory_entry> entries;
+    // A permission error or a symlink dangling mid-scan throws
+    // filesystem_error even with the error_code-taking constructor, since
+    // range-based for always calls the throwing operator++() -- catch it
+    // so one bad entry doesn't lose whatever was already found.
     try {
         for (const auto& entry : std::filesystem::directory_iterator(folderPath, ec)) {
-            if (ec) break;
-            if (!entry.is_regular_file()) continue;
+            if (ec) {
+                fprintf(stderr, "[hTV] Playlist scan of \"%s\" stopped early: %s\n",
+                    folderPath.c_str(), ec.message().c_str());
+                break;
+            }
+            totalEntries++;
+
+            // Per-entry error_code overload -- unlike the throwing
+            // is_regular_file(), a single broken symlink or a stat
+            // failure here only skips that one entry instead of aborting
+            // the whole scan via the catch below.
+            std::error_code statEc;
+            bool isRegular = entry.is_regular_file(statEc);
+            if (statEc) {
+                statErrors++;
+                continue;
+            }
+            if (!isRegular) {
+                notRegularFiles++;
+                continue;
+            }
+
             std::string ext = entry.path().extension().string();
             if (!ext.empty() && ext[0] == '.') ext.erase(0, 1);
             std::transform(ext.begin(), ext.end(), ext.begin(),
                             [](unsigned char c) { return std::tolower(c); });
-            if (IsPlayableExtension(ext)) entries.push_back(entry);
+            if (IsPlayableExtension(ext)) {
+                entries.push_back(entry);
+            } else {
+                wrongExtension++;
+            }
         }
-    } catch (const std::filesystem::filesystem_error&) {
-        // Whatever was found before the error is still shown below.
+    } catch (const std::filesystem::filesystem_error& e) {
+        fprintf(stderr, "[hTV] Playlist scan of \"%s\" threw: %s\n",
+            folderPath.c_str(), e.what());
     }
+
+    fprintf(stderr, "[hTV] Playlist folder \"%s\": %d entries seen, %d matched a playable "
+        "extension, %d had a different extension, %d weren't regular files, %d couldn't be "
+        "stat'd.\n", folderPath.c_str(), totalEntries, (int)entries.size(), wrongExtension,
+        notRegularFiles, statErrors);
 
     std::sort(entries.begin(), entries.end(), [](const auto& a, const auto& b) {
         return a.path().filename().string() < b.path().filename().string();
@@ -526,11 +564,13 @@ private:
     BSlider*    fRoomSizeSlider;
     BSlider*    fDampingSlider;
     BSlider*    fWetSlider;
+    BGroupView* fReverbControlsGroup;
 
     BCheckBox*  fChorusToggle;
     BSlider*    fChorusRateSlider;
     BSlider*    fChorusDepthSlider;
     BSlider*    fChorusMixSlider;
+    BGroupView* fChorusControlsGroup;
 
     BButton*     fPlaylistFolderButton;
     BFilePanel*  fPlaylistFolderPanel;
@@ -591,6 +631,38 @@ ConfigWindow::ConfigWindow()
     fPresetField = new BMenuField("preset_field", "Preset:", presetMenu);
     background->AddChild(fPresetField);
 
+    // ---- Limiter (paired with the EQ, same as HaikuSuperMusicThingy: a
+    // narrow vertical column of short horizontal sliders sitting to the
+    // right of the EQ bands inside the same horizontal row, instead of
+    // three full-width rows below it -- and labeled "In"/"Lmt"/"Rel", the
+    // same abbreviations HaikuSuperMusicThingy uses for this exact
+    // control) ----
+    BGroupView* limitGroup = new BGroupView(B_VERTICAL, 5);
+    BStringView* limiterTitle = new BStringView(NULL, "Limiter");
+    limiterTitle->SetFont(be_bold_font);
+    limitGroup->AddChild(limiterTitle);
+
+    BMessage* limitInMsg = new BMessage(MSG_CFG_LIMITER_SLIDER);
+    limitInMsg->AddInt32("param", 0);
+    fLimitInputSlider = new WheelSlider("limit_in", "In", limitInMsg, -20, 20, B_HORIZONTAL, 1);
+    fLimitInputSlider->SetValue((int32)gAudioCfg.limitInput);
+    fLimitInputSlider->SetExplicitMinSize(BSize(90, B_SIZE_UNSET));
+    limitGroup->AddChild(fLimitInputSlider);
+
+    BMessage* limitThreshMsg = new BMessage(MSG_CFG_LIMITER_SLIDER);
+    limitThreshMsg->AddInt32("param", 1);
+    fLimitThresholdSlider = new WheelSlider("limit_thr", "Lmt", limitThreshMsg, -20, 0, B_HORIZONTAL, 1);
+    fLimitThresholdSlider->SetValue((int32)gAudioCfg.limitThreshold);
+    fLimitThresholdSlider->SetExplicitMinSize(BSize(90, B_SIZE_UNSET));
+    limitGroup->AddChild(fLimitThresholdSlider);
+
+    BMessage* limitRelMsg = new BMessage(MSG_CFG_LIMITER_SLIDER);
+    limitRelMsg->AddInt32("param", 2);
+    fLimitReleaseSlider = new WheelSlider("limit_rel", "Rel", limitRelMsg, 10, 1000, B_HORIZONTAL, 5);
+    fLimitReleaseSlider->SetValue((int32)gAudioCfg.limitRelease);
+    fLimitReleaseSlider->SetExplicitMinSize(BSize(90, B_SIZE_UNSET));
+    limitGroup->AddChild(fLimitReleaseSlider);
+
     BGroupView* sliderRow = new BGroupView(B_HORIZONTAL, 4);
     for (int i = 0; i < 15; i++) {
         BGroupView* bandGroup = new BGroupView(B_VERTICAL, 2);
@@ -614,32 +686,15 @@ ConfigWindow::ConfigWindow()
         bandGroup->AddChild(lbl);
         sliderRow->AddChild(bandGroup);
     }
+    sliderRow->AddChild(limitGroup);
     background->AddChild(sliderRow);
 
-    // ---- Limiter (paired with the EQ, same as HaikuSuperMusicThingy) ----
-    BStringView* limiterTitle = new BStringView(NULL, "Limiter");
-    limiterTitle->SetFont(be_bold_font);
-    background->AddChild(limiterTitle);
-
-    BMessage* limitInMsg = new BMessage(MSG_CFG_LIMITER_SLIDER);
-    limitInMsg->AddInt32("param", 0);
-    fLimitInputSlider = new WheelSlider("limit_in", "In", limitInMsg, -20, 20, B_HORIZONTAL, 1);
-    fLimitInputSlider->SetValue((int32)gAudioCfg.limitInput);
-    background->AddChild(fLimitInputSlider);
-
-    BMessage* limitThreshMsg = new BMessage(MSG_CFG_LIMITER_SLIDER);
-    limitThreshMsg->AddInt32("param", 1);
-    fLimitThresholdSlider = new WheelSlider("limit_thr", "Threshold", limitThreshMsg, -20, 0, B_HORIZONTAL, 1);
-    fLimitThresholdSlider->SetValue((int32)gAudioCfg.limitThreshold);
-    background->AddChild(fLimitThresholdSlider);
-
-    BMessage* limitRelMsg = new BMessage(MSG_CFG_LIMITER_SLIDER);
-    limitRelMsg->AddInt32("param", 2);
-    fLimitReleaseSlider = new WheelSlider("limit_rel", "Release", limitRelMsg, 10, 1000, B_HORIZONTAL, 5);
-    fLimitReleaseSlider->SetValue((int32)gAudioCfg.limitRelease);
-    background->AddChild(fLimitReleaseSlider);
-
     // ---- Reverb & FX ----
+    // Room Size/Damping/Wet (and the Type field) only matter once Reverb
+    // is actually on, so they're wrapped in one group and hidden until
+    // then -- same show/hide-on-checkbox idea as the Playlist file list
+    // below, applied here to keep the window from always reserving space
+    // for controls that don't do anything yet.
     BStringView* fxTitle = new BStringView(NULL, "Reverb & Effects");
     fxTitle->SetFont(be_bold_font);
     background->AddChild(fxTitle);
@@ -647,6 +702,8 @@ ConfigWindow::ConfigWindow()
     fReverbToggle = new BCheckBox("reverb_toggle", "Enable Reverb", new BMessage(MSG_CFG_REVERB_TOGGLE));
     fReverbToggle->SetValue(gAudioCfg.reverbEnabled ? B_CONTROL_ON : B_CONTROL_OFF);
     background->AddChild(fReverbToggle);
+
+    fReverbControlsGroup = new BGroupView(B_VERTICAL, 6);
 
     BPopUpMenu* reverbTypeMenu = new BPopUpMenu("Type");
     const char* reverbTypeNames[] = { "Room", "Hall", "Plate", "Canyon" };
@@ -657,49 +714,58 @@ ConfigWindow::ConfigWindow()
     }
     reverbTypeMenu->ItemAt(gAudioCfg.reverbType % 4)->SetMarked(true);
     fReverbTypeField = new BMenuField("reverb_type_field", "Type:", reverbTypeMenu);
-    background->AddChild(fReverbTypeField);
+    fReverbControlsGroup->AddChild(fReverbTypeField);
 
     BMessage* roomMsg = new BMessage(MSG_CFG_REVERB_SLIDER);
     roomMsg->AddInt32("param", 0);
     fRoomSizeSlider = new WheelSlider("reverb_room", "Room Size", roomMsg, 0, 100, B_HORIZONTAL, 1);
     fRoomSizeSlider->SetValue((int32)gAudioCfg.reverbRoomSize);
-    background->AddChild(fRoomSizeSlider);
+    fReverbControlsGroup->AddChild(fRoomSizeSlider);
 
     BMessage* dampMsg = new BMessage(MSG_CFG_REVERB_SLIDER);
     dampMsg->AddInt32("param", 1);
     fDampingSlider = new WheelSlider("reverb_damp", "Damping", dampMsg, 0, 100, B_HORIZONTAL, 1);
     fDampingSlider->SetValue((int32)gAudioCfg.reverbDamping);
-    background->AddChild(fDampingSlider);
+    fReverbControlsGroup->AddChild(fDampingSlider);
 
     BMessage* wetMsg = new BMessage(MSG_CFG_REVERB_SLIDER);
     wetMsg->AddInt32("param", 2);
     fWetSlider = new WheelSlider("reverb_wet", "Wet Level", wetMsg, 0, 100, B_HORIZONTAL, 1);
     fWetSlider->SetValue((int32)gAudioCfg.reverbWet);
-    background->AddChild(fWetSlider);
+    fReverbControlsGroup->AddChild(fWetSlider);
+
+    background->AddChild(fReverbControlsGroup);
+    if (!gAudioCfg.reverbEnabled) fReverbControlsGroup->Hide();
 
     fChorusToggle = new BCheckBox("chorus_toggle", "Enable Chorus", new BMessage(MSG_CFG_CHORUS_TOGGLE));
     fChorusToggle->SetValue(gAudioCfg.chorusEnabled ? B_CONTROL_ON : B_CONTROL_OFF);
     background->AddChild(fChorusToggle);
 
     // Chorus gets the same dynamic Rate/Depth/Mix sliders Reverb has,
-    // instead of being a fixed-parameter on/off toggle.
+    // instead of being a fixed-parameter on/off toggle -- same hide-
+    // unless-enabled treatment.
+    fChorusControlsGroup = new BGroupView(B_VERTICAL, 6);
+
     BMessage* chorusRateMsg = new BMessage(MSG_CFG_CHORUS_SLIDER);
     chorusRateMsg->AddInt32("param", 0);
     fChorusRateSlider = new WheelSlider("chorus_rate", "Rate", chorusRateMsg, 0, 100, B_HORIZONTAL, 1);
     fChorusRateSlider->SetValue((int32)gAudioCfg.chorusRate);
-    background->AddChild(fChorusRateSlider);
+    fChorusControlsGroup->AddChild(fChorusRateSlider);
 
     BMessage* chorusDepthMsg = new BMessage(MSG_CFG_CHORUS_SLIDER);
     chorusDepthMsg->AddInt32("param", 1);
     fChorusDepthSlider = new WheelSlider("chorus_depth", "Depth", chorusDepthMsg, 0, 100, B_HORIZONTAL, 1);
     fChorusDepthSlider->SetValue((int32)gAudioCfg.chorusDepth);
-    background->AddChild(fChorusDepthSlider);
+    fChorusControlsGroup->AddChild(fChorusDepthSlider);
 
     BMessage* chorusMixMsg = new BMessage(MSG_CFG_CHORUS_SLIDER);
     chorusMixMsg->AddInt32("param", 2);
     fChorusMixSlider = new WheelSlider("chorus_mix", "Mix", chorusMixMsg, 0, 100, B_HORIZONTAL, 1);
     fChorusMixSlider->SetValue((int32)gAudioCfg.chorusMix);
-    background->AddChild(fChorusMixSlider);
+    fChorusControlsGroup->AddChild(fChorusMixSlider);
+
+    background->AddChild(fChorusControlsGroup);
+    if (!gAudioCfg.chorusEnabled) fChorusControlsGroup->Hide();
 
     // ---- Playlist ----
     // Folder button + label mirrors HaikuDVR's "Save Recordings To Folder"
@@ -841,6 +907,13 @@ void ConfigWindow::MessageReceived(BMessage* message) {
         }
         case MSG_CFG_REVERB_TOGGLE: {
             gAudioCfg.reverbEnabled = (fReverbToggle->Value() == B_CONTROL_ON);
+            if (gAudioCfg.reverbEnabled) {
+                fReverbControlsGroup->Show();
+            } else {
+                fReverbControlsGroup->Hide();
+            }
+            InvalidateLayout(true);
+            ResizeToPreferred();
             ApplyAudioFilters(g_mpv);
             SaveAudioConfig();
             break;
@@ -869,6 +942,13 @@ void ConfigWindow::MessageReceived(BMessage* message) {
         }
         case MSG_CFG_CHORUS_TOGGLE: {
             gAudioCfg.chorusEnabled = (fChorusToggle->Value() == B_CONTROL_ON);
+            if (gAudioCfg.chorusEnabled) {
+                fChorusControlsGroup->Show();
+            } else {
+                fChorusControlsGroup->Hide();
+            }
+            InvalidateLayout(true);
+            ResizeToPreferred();
             ApplyAudioFilters(g_mpv);
             SaveAudioConfig();
             break;
@@ -1217,7 +1297,7 @@ int main(int argc, char* argv[]) {
 
 	{
 	    const char* targetUrl = "https://raw.githubusercontent.com/ablyssx74/hTV/refs/heads/main/VERSION";
-	    const char* localVersion = "v1.2.0";
+	    const char* localVersion = "v1.2.1";
 	
 	    char updateCmd[1024];
 	    snprintf(updateCmd, sizeof(updateCmd),
