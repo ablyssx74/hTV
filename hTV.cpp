@@ -1011,36 +1011,19 @@ void ConfigWindow::MessageReceived(BMessage* message) {
             ResizeToPreferred();
 
             if (show) {
-                // Confirmed on real hardware: fPlaylistScroll's own
-                // Bounds() comes back correctly sized once the window
-                // settles (585x120), but fPlaylistList's Bounds() was
-                // still (0,0,-1,-1) -- Haiku's canonical "invalid/
-                // zero-size rect" (right < left). BScrollView resolves
-                // its own size through the layout system fine, but isn't
-                // propagating that down to a target that was never given
-                // an explicit frame before being wrapped -- so force the
-                // sync directly instead of relying on whatever internal
-                // mechanism isn't firing for this target.
+                // Confirmed on real hardware: BScrollView resolves its
+                // own size through the layout system fine, but doesn't
+                // propagate that down to a target that was never given
+                // an explicit frame before being wrapped -- fPlaylistList
+                // was rendering at Haiku's canonical invalid/zero-size
+                // rect (right < left) despite genuinely holding items.
+                // Force the sync directly rather than rely on whatever
+                // internal mechanism isn't firing for this target.
                 BRect scrollBounds = fPlaylistScroll->Bounds();
                 if (scrollBounds.IsValid()) {
                     fPlaylistList->ResizeTo(scrollBounds.Width(), scrollBounds.Height());
                 }
                 fPlaylistList->Invalidate();
-
-                // Diagnostic kept for one more round to confirm the fix
-                // actually closed the gap between these two Bounds().
-                BRect listBounds = fPlaylistList->Bounds();
-                BRect scrollFrame = fPlaylistScroll->Frame();
-                fprintf(stderr, "[hTV] Playlist list: %d items, "
-                    "list Bounds=(%.0f,%.0f,%.0f,%.0f), "
-                    "scroll Bounds=(%.0f,%.0f,%.0f,%.0f), "
-                    "scroll Frame=(%.0f,%.0f,%.0f,%.0f), "
-                    "list IsHidden=%d, scroll IsHidden=%d\n",
-                    (int)fPlaylistList->CountItems(),
-                    listBounds.left, listBounds.top, listBounds.right, listBounds.bottom,
-                    scrollBounds.left, scrollBounds.top, scrollBounds.right, scrollBounds.bottom,
-                    scrollFrame.left, scrollFrame.top, scrollFrame.right, scrollFrame.bottom,
-                    (int)fPlaylistList->IsHidden(), (int)fPlaylistScroll->IsHidden());
             }
             break;
         }
@@ -1344,7 +1327,7 @@ int main(int argc, char* argv[]) {
 
 	{
 	    const char* targetUrl = "https://raw.githubusercontent.com/ablyssx74/hTV/refs/heads/main/VERSION";
-	    const char* localVersion = "v1.2.4";
+	    const char* localVersion = "v1.2.5";
 	
 	    char updateCmd[1024];
 	    snprintf(updateCmd, sizeof(updateCmd),
