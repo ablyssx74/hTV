@@ -13,6 +13,7 @@
 #include <string.h>
 #include <sys/stat.h>
 #include <new>
+#include <math.h>
 
 // Native Haiku (Be API) interface kit -- used for the right-click "Config"
 // popup menu and the Audio Configuration window (15-band EQ / reverb / FX).
@@ -65,10 +66,13 @@ struct PlayerCtx {
 // technique hDesktop uses (https://github.com/ablyssx74/hDesktop), instead of
 // HaikuSuperMusicThingy's JSON config file.
 //
+// The EQ is paired with a mastering limiter (In/Threshold/Release), same as
+// HaikuSuperMusicThingy's own `alimiter` stage chained after its EQ bands.
+//
 // mpv/ffmpeg has no dedicated "reverb" audio filter, so the Reverb section
 // below builds a tuned ffmpeg `aecho` chain -- the technique mpv's own manual
-// recommends for adding echo/reverb-style ambience -- with Room/Hall/Plate
-// presets, plus a simple `chorus` filter as an extra bonus effect.
+// recommends for adding echo/reverb-style ambience -- with Room/Hall/Plate/
+// Canyon presets, plus a tunable `chorus` filter as an extra bonus effect.
 
 // mpv client handle shared with the audio-config UI thread. libmpv's client
 // API (mpv_set_property_string etc.) is documented as thread-safe, so the
@@ -80,8 +84,15 @@ struct AudioConfig {
     bool  eqEnabled = false;
     float eqBands[15] = {0.0f};
 
+    // Mastering limiter -- same In/Threshold/Release controls
+    // HaikuSuperMusicThingy pairs with its EQ (an ffmpeg `alimiter` chained
+    // right after the 15 equalizer bands), active whenever the EQ is.
+    float limitInput = 0.0f;      // -20..20 dB
+    float limitThreshold = 0.0f;  // -20..0 dB
+    float limitRelease = 100.0f;  // 10..1000 ms
+
     bool  reverbEnabled = false;
-    int32 reverbType = 0;          // 0 = Room, 1 = Hall, 2 = Plate
+    int32 reverbType = 0;          // 0 = Room, 1 = Hall, 2 = Plate, 3 = Canyon
     float reverbRoomSize = 50.0f;  // 0..100
     float reverbDamping = 50.0f;   // 0..100
     float reverbWet = 30.0f;       // 0..100
@@ -137,6 +148,19 @@ static void BuildAudioFilterChain(BString& chain) {
                               kEqFrequencies[i], gAudioCfg.eqBands[i]);
             chain << band;
         }
+
+        // Mastering limiter, chained right after the EQ bands -- same
+        // In/Threshold/Release controls and dB-to-linear-gain math
+        // HaikuSuperMusicThingy uses for its own `alimiter` stage.
+        float inputGain = pow(10.0f, gAudioCfg.limitInput / 20.0f);
+        float limitVal  = pow(10.0f, gAudioCfg.limitThreshold / 20.0f);
+        if (limitVal <= 0.001f) limitVal = 0.001f;
+        if (inputGain <= 0.001f) inputGain = 0.001f;
+
+        BString limiter;
+        limiter.SetToFormat("alimiter=level_in=%.2f:limit=%.2f:release=%.2f,",
+                             inputGain, limitVal, gAudioCfg.limitRelease);
+        chain << limiter;
     }
 
     if (gAudioCfg.reverbEnabled) {
@@ -149,12 +173,13 @@ static void BuildAudioFilterChain(BString& chain) {
         float roomScale = 0.5f + (gAudioCfg.reverbRoomSize / 100.0f) * 1.5f; // 0.5x..2.0x
 
         struct ReverbProfile { float delayMs[3]; float decay[3]; };
-        static const ReverbProfile kProfiles[3] = {
-            { {60.0f, 100.0f, 150.0f}, {0.35f, 0.25f, 0.15f} },  // Room
-            { {150.0f, 220.0f, 340.0f}, {0.55f, 0.45f, 0.30f} }, // Hall
-            { {30.0f, 55.0f, 90.0f},   {0.45f, 0.35f, 0.25f} }   // Plate
+        static const ReverbProfile kProfiles[4] = {
+            { {60.0f, 100.0f, 150.0f}, {0.35f, 0.25f, 0.15f} },   // Room
+            { {150.0f, 220.0f, 340.0f}, {0.55f, 0.45f, 0.30f} },  // Hall
+            { {30.0f, 55.0f, 90.0f},   {0.45f, 0.35f, 0.25f} },   // Plate
+            { {280.0f, 480.0f, 700.0f}, {0.55f, 0.45f, 0.35f} }   // Canyon
         };
-        const ReverbProfile& profile = kProfiles[gAudioCfg.reverbType % 3];
+        const ReverbProfile& profile = kProfiles[gAudioCfg.reverbType % 4];
 
         BString delays, decays;
         for (int i = 0; i < 3; i++) {
@@ -225,6 +250,9 @@ static void SaveAudioConfig() {
     for (int i = 0; i < 15; i++) {
         settings.AddFloat("eq_band", gAudioCfg.eqBands[i]);
     }
+    settings.AddFloat("limit_input", gAudioCfg.limitInput);
+    settings.AddFloat("limit_threshold", gAudioCfg.limitThreshold);
+    settings.AddFloat("limit_release", gAudioCfg.limitRelease);
     settings.AddBool("reverb_enabled", gAudioCfg.reverbEnabled);
     settings.AddInt32("reverb_type", gAudioCfg.reverbType);
     settings.AddFloat("reverb_room_size", gAudioCfg.reverbRoomSize);
@@ -249,6 +277,9 @@ static void SaveAudioConfig() {
 static void LoadAudioConfig() {
     gAudioCfg.eqEnabled = false;
     for (int i = 0; i < 15; i++) gAudioCfg.eqBands[i] = 0.0f;
+    gAudioCfg.limitInput = 0.0f;
+    gAudioCfg.limitThreshold = 0.0f;
+    gAudioCfg.limitRelease = 100.0f;
     gAudioCfg.reverbEnabled = false;
     gAudioCfg.reverbType = 0;
     gAudioCfg.reverbRoomSize = 50.0f;
@@ -277,6 +308,9 @@ static void LoadAudioConfig() {
     for (int i = 0; i < 15; i++) {
         if (settings.FindFloat("eq_band", i, &valFloat) == B_OK) gAudioCfg.eqBands[i] = valFloat;
     }
+    if (settings.FindFloat("limit_input", &valFloat) == B_OK) gAudioCfg.limitInput = valFloat;
+    if (settings.FindFloat("limit_threshold", &valFloat) == B_OK) gAudioCfg.limitThreshold = valFloat;
+    if (settings.FindFloat("limit_release", &valFloat) == B_OK) gAudioCfg.limitRelease = valFloat;
     if (settings.FindBool("reverb_enabled", &valBool) == B_OK) gAudioCfg.reverbEnabled = valBool;
     if (settings.FindInt32("reverb_type", &valInt32) == B_OK) gAudioCfg.reverbType = valInt32;
     if (settings.FindFloat("reverb_room_size", &valFloat) == B_OK) gAudioCfg.reverbRoomSize = valFloat;
@@ -324,6 +358,7 @@ enum {
     MSG_CFG_EQ_TOGGLE      = 'cfeq',
     MSG_CFG_EQ_SLIDER      = 'cfes',
     MSG_CFG_PRESET_SELECT  = 'cfps',
+    MSG_CFG_LIMITER_SLIDER = 'cfls',
     MSG_CFG_REVERB_TOGGLE  = 'cfrt',
     MSG_CFG_REVERB_TYPE    = 'cfry',
     MSG_CFG_REVERB_SLIDER  = 'cfrs',
@@ -343,6 +378,10 @@ private:
     BCheckBox*  fEQToggle;
     BSlider*    fEQSliders[15];
     BMenuField* fPresetField;
+
+    BSlider*    fLimitInputSlider;
+    BSlider*    fLimitThresholdSlider;
+    BSlider*    fLimitReleaseSlider;
 
     BCheckBox*  fReverbToggle;
     BMenuField* fReverbTypeField;
@@ -431,6 +470,29 @@ ConfigWindow::ConfigWindow()
     }
     background->AddChild(sliderRow);
 
+    // ---- Limiter (paired with the EQ, same as HaikuSuperMusicThingy) ----
+    BStringView* limiterTitle = new BStringView(NULL, "Limiter");
+    limiterTitle->SetFont(be_bold_font);
+    background->AddChild(limiterTitle);
+
+    BMessage* limitInMsg = new BMessage(MSG_CFG_LIMITER_SLIDER);
+    limitInMsg->AddInt32("param", 0);
+    fLimitInputSlider = new WheelSlider("limit_in", "In", limitInMsg, -20, 20, B_HORIZONTAL, 1);
+    fLimitInputSlider->SetValue((int32)gAudioCfg.limitInput);
+    background->AddChild(fLimitInputSlider);
+
+    BMessage* limitThreshMsg = new BMessage(MSG_CFG_LIMITER_SLIDER);
+    limitThreshMsg->AddInt32("param", 1);
+    fLimitThresholdSlider = new WheelSlider("limit_thr", "Threshold", limitThreshMsg, -20, 0, B_HORIZONTAL, 1);
+    fLimitThresholdSlider->SetValue((int32)gAudioCfg.limitThreshold);
+    background->AddChild(fLimitThresholdSlider);
+
+    BMessage* limitRelMsg = new BMessage(MSG_CFG_LIMITER_SLIDER);
+    limitRelMsg->AddInt32("param", 2);
+    fLimitReleaseSlider = new WheelSlider("limit_rel", "Release", limitRelMsg, 10, 1000, B_HORIZONTAL, 5);
+    fLimitReleaseSlider->SetValue((int32)gAudioCfg.limitRelease);
+    background->AddChild(fLimitReleaseSlider);
+
     // ---- Reverb & FX ----
     BStringView* fxTitle = new BStringView(NULL, "Reverb & Effects");
     fxTitle->SetFont(be_bold_font);
@@ -441,13 +503,13 @@ ConfigWindow::ConfigWindow()
     background->AddChild(fReverbToggle);
 
     BPopUpMenu* reverbTypeMenu = new BPopUpMenu("Type");
-    const char* reverbTypeNames[] = { "Room", "Hall", "Plate" };
-    for (int i = 0; i < 3; i++) {
+    const char* reverbTypeNames[] = { "Room", "Hall", "Plate", "Canyon" };
+    for (int i = 0; i < 4; i++) {
         BMessage* msg = new BMessage(MSG_CFG_REVERB_TYPE);
         msg->AddInt32("type", i);
         reverbTypeMenu->AddItem(new BMenuItem(reverbTypeNames[i], msg));
     }
-    reverbTypeMenu->ItemAt(gAudioCfg.reverbType % 3)->SetMarked(true);
+    reverbTypeMenu->ItemAt(gAudioCfg.reverbType % 4)->SetMarked(true);
     fReverbTypeField = new BMenuField("reverb_type_field", "Type:", reverbTypeMenu);
     background->AddChild(fReverbTypeField);
 
@@ -497,6 +559,9 @@ ConfigWindow::ConfigWindow()
     fEQToggle->SetTarget(this);
     presetMenu->SetTargetForItems(this);
     for (int i = 0; i < 15; i++) fEQSliders[i]->SetTarget(this);
+    fLimitInputSlider->SetTarget(this);
+    fLimitThresholdSlider->SetTarget(this);
+    fLimitReleaseSlider->SetTarget(this);
     fReverbToggle->SetTarget(this);
     reverbTypeMenu->SetTargetForItems(this);
     fRoomSizeSlider->SetTarget(this);
@@ -540,6 +605,19 @@ void ConfigWindow::MessageReceived(BMessage* message) {
             int32 band = 0;
             if (message->FindInt32("band", &band) == B_OK && band >= 0 && band < 15) {
                 gAudioCfg.eqBands[band] = (float)fEQSliders[band]->Value();
+            }
+            ApplyAudioFilters(g_mpv);
+            SaveAudioConfig();
+            break;
+        }
+        case MSG_CFG_LIMITER_SLIDER: {
+            int32 param = 0;
+            message->FindInt32("param", &param);
+            switch (param) {
+                case 0: gAudioCfg.limitInput     = (float)fLimitInputSlider->Value(); break;
+                case 1: gAudioCfg.limitThreshold = (float)fLimitThresholdSlider->Value(); break;
+                case 2: gAudioCfg.limitRelease    = (float)fLimitReleaseSlider->Value(); break;
+                default: break;
             }
             ApplyAudioFilters(g_mpv);
             SaveAudioConfig();
@@ -841,7 +919,7 @@ int main(int argc, char* argv[]) {
 
 	{
 	    const char* targetUrl = "https://raw.githubusercontent.com/ablyssx74/hTV/refs/heads/main/VERSION";
-	    const char* localVersion = "v1.0.7"; 
+	    const char* localVersion = "v1.1.0";
 	
 	    char updateCmd[1024];
 	    snprintf(updateCmd, sizeof(updateCmd),
