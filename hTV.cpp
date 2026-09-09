@@ -989,6 +989,19 @@ void ConfigWindow::MessageReceived(BMessage* message) {
         case MSG_CFG_PLAYLIST_TOGGLE: {
             bool show = (fPlaylistToggle->Value() == B_CONTROL_ON);
             if (show) {
+                // Re-populate right as the panel opens, not just back at
+                // folder-pick/construction time. Confirmed on real
+                // hardware: the scan itself found every file correctly
+                // (matches the stderr summary), but the list rendered
+                // empty -- items added to a BListView before its window
+                // is actually Show()n/attached to app_server can end up
+                // with unresolved font/height metrics, present in the
+                // data model but effectively zero-height on screen.
+                // Rescanning here runs after the window is definitely
+                // shown, so it's not relying on figuring out exactly
+                // which of those earlier calls was too early.
+                PopulatePlaylistList(fPlaylistList, gAudioCfg.playlistFolder);
+                fPlaylistList->Invalidate();
                 fPlaylistScroll->Show();
             } else {
                 fPlaylistScroll->Hide();
@@ -1297,7 +1310,7 @@ int main(int argc, char* argv[]) {
 
 	{
 	    const char* targetUrl = "https://raw.githubusercontent.com/ablyssx74/hTV/refs/heads/main/VERSION";
-	    const char* localVersion = "v1.2.1";
+	    const char* localVersion = "v1.2.2";
 	
 	    char updateCmd[1024];
 	    snprintf(updateCmd, sizeof(updateCmd),
