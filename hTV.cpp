@@ -332,18 +332,24 @@ ConfigWindow::ConfigWindow()
     : BWindow(BRect(120, 120, 120 + 680, 120 + 470), "hTV - Audio Configuration",
               B_TITLED_WINDOW, B_NOT_ZOOMABLE | B_ASYNCHRONOUS_CONTROLS)
 {
-    BGroupView* root = new BGroupView(B_VERTICAL, 10);
-    root->GroupLayout()->SetInsets(14, 14, 14, 14);
-    AddChild(root);
+    // BWindow supports a BLayout directly (this is the same idiom
+    // HaikuSuperMusicThingy uses via BLayoutBuilder::Group<>(this, ...)):
+    // giving the window its own BGroupLayout lets every top-level child
+    // added below via AddChild() get properly sized and positioned. Without
+    // this, a freestanding BGroupView added as the window's child keeps its
+    // zero-size default frame and the window renders blank.
+    BGroupLayout* rootLayout = new BGroupLayout(B_VERTICAL, 10);
+    rootLayout->SetInsets(14, 14, 14, 14);
+    SetLayout(rootLayout);
 
     // ---- 15-Band EQ ----
     BStringView* eqTitle = new BStringView(NULL, "15-Band Equalizer");
     eqTitle->SetFont(be_bold_font);
-    root->AddChild(eqTitle);
+    AddChild(eqTitle);
 
     fEQToggle = new BCheckBox("eq_toggle", "Enable Equalizer", new BMessage(MSG_CFG_EQ_TOGGLE));
     fEQToggle->SetValue(gAudioCfg.eqEnabled ? B_CONTROL_ON : B_CONTROL_OFF);
-    root->AddChild(fEQToggle);
+    AddChild(fEQToggle);
 
     BPopUpMenu* presetMenu = new BPopUpMenu("Preset");
     const char* presetNames[] = { "Flat", "Rock", "Jazz", "Bass Boost" };
@@ -353,7 +359,7 @@ ConfigWindow::ConfigWindow()
         presetMenu->AddItem(new BMenuItem(presetNames[i], msg));
     }
     fPresetField = new BMenuField("preset_field", "Preset:", presetMenu);
-    root->AddChild(fPresetField);
+    AddChild(fPresetField);
 
     BGroupView* sliderRow = new BGroupView(B_HORIZONTAL, 4);
     for (int i = 0; i < 15; i++) {
@@ -378,16 +384,16 @@ ConfigWindow::ConfigWindow()
         bandGroup->AddChild(lbl);
         sliderRow->AddChild(bandGroup);
     }
-    root->AddChild(sliderRow);
+    AddChild(sliderRow);
 
     // ---- Reverb & FX ----
     BStringView* fxTitle = new BStringView(NULL, "Reverb & Effects");
     fxTitle->SetFont(be_bold_font);
-    root->AddChild(fxTitle);
+    AddChild(fxTitle);
 
     fReverbToggle = new BCheckBox("reverb_toggle", "Enable Reverb", new BMessage(MSG_CFG_REVERB_TOGGLE));
     fReverbToggle->SetValue(gAudioCfg.reverbEnabled ? B_CONTROL_ON : B_CONTROL_OFF);
-    root->AddChild(fReverbToggle);
+    AddChild(fReverbToggle);
 
     BPopUpMenu* reverbTypeMenu = new BPopUpMenu("Type");
     const char* reverbTypeNames[] = { "Room", "Hall", "Plate" };
@@ -398,29 +404,29 @@ ConfigWindow::ConfigWindow()
     }
     reverbTypeMenu->ItemAt(gAudioCfg.reverbType % 3)->SetMarked(true);
     fReverbTypeField = new BMenuField("reverb_type_field", "Type:", reverbTypeMenu);
-    root->AddChild(fReverbTypeField);
+    AddChild(fReverbTypeField);
 
     BMessage* roomMsg = new BMessage(MSG_CFG_REVERB_SLIDER);
     roomMsg->AddInt32("param", 0);
     fRoomSizeSlider = new WheelSlider("reverb_room", "Room Size", roomMsg, 0, 100, B_HORIZONTAL, 1);
     fRoomSizeSlider->SetValue((int32)gAudioCfg.reverbRoomSize);
-    root->AddChild(fRoomSizeSlider);
+    AddChild(fRoomSizeSlider);
 
     BMessage* dampMsg = new BMessage(MSG_CFG_REVERB_SLIDER);
     dampMsg->AddInt32("param", 1);
     fDampingSlider = new WheelSlider("reverb_damp", "Damping", dampMsg, 0, 100, B_HORIZONTAL, 1);
     fDampingSlider->SetValue((int32)gAudioCfg.reverbDamping);
-    root->AddChild(fDampingSlider);
+    AddChild(fDampingSlider);
 
     BMessage* wetMsg = new BMessage(MSG_CFG_REVERB_SLIDER);
     wetMsg->AddInt32("param", 2);
     fWetSlider = new WheelSlider("reverb_wet", "Wet Level", wetMsg, 0, 100, B_HORIZONTAL, 1);
     fWetSlider->SetValue((int32)gAudioCfg.reverbWet);
-    root->AddChild(fWetSlider);
+    AddChild(fWetSlider);
 
     fChorusToggle = new BCheckBox("chorus_toggle", "Enable Chorus", new BMessage(MSG_CFG_CHORUS_TOGGLE));
     fChorusToggle->SetValue(gAudioCfg.chorusEnabled ? B_CONTROL_ON : B_CONTROL_OFF);
-    root->AddChild(fChorusToggle);
+    AddChild(fChorusToggle);
 
     // Route every control's message to this window.
     fEQToggle->SetTarget(this);
