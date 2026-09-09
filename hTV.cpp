@@ -20,6 +20,7 @@
 // SDL already brings up a BApplication under the hood on Haiku, so it's
 // safe to create additional BWindows/BPopUpMenus from application code.
 #include <Application.h>
+#include <Handler.h>
 #include <Window.h>
 #include <View.h>
 #include <GroupView.h>
@@ -705,20 +706,49 @@ static void ShowConfigWindow() {
     gConfigWindow->Show();
 }
 
+enum {
+    MSG_OPEN_CONFIG = 'ocfg'
+};
+
+// Target for the context menu's "Config" item. Calling BPopUpMenu::Go()
+// synchronously blocks the calling thread until the menu is dismissed --
+// on the SDL main-loop thread that means SDL_WaitEvent()/mpv rendering
+// stop dead, which is exactly the frozen-video-behind-the-menu behavior.
+// Routing the menu item's message to this BHandler (attached to be_app's
+// own looper, which already has its own thread from SDL) instead lets
+// Go() run asynchronously: it returns immediately, the SDL loop keeps
+// pumping events and rendering frames while the menu is open, and the
+// selection arrives here later as an ordinary posted message.
+class ContextMenuHandler : public BHandler {
+public:
+    ContextMenuHandler() : BHandler("hTVContextMenuHandler") {}
+
+    virtual void MessageReceived(BMessage* message) {
+        if (message->what == MSG_OPEN_CONFIG) {
+            ShowConfigWindow();
+        } else {
+            BHandler::MessageReceived(message);
+        }
+    }
+};
+
+static ContextMenuHandler* gContextMenuHandler = nullptr;
+
 // Builds and runs the right-click "apps screen" popup menu. `screenPoint`
-// must be in screen coordinates. This is the classic "pop-up menu without
-// a window" pattern: BPopUpMenu::Go() blocks the calling thread and returns
-// the selected item directly, so it can be called from the SDL main loop's
-// thread without needing a BLooper of its own.
+// must be in screen coordinates. Run asynchronously (see ContextMenuHandler
+// above) so the video keeps playing/rendering behind the menu instead of
+// freezing until it's dismissed. In async mode BPopUpMenu deletes itself
+// once it closes, so it must not be deleted here.
 static void ShowMainContextMenu(BPoint screenPoint) {
     BPopUpMenu* contextMenu = new BPopUpMenu("hTVContextMenu", false, false);
-    contextMenu->AddItem(new BMenuItem("Config", nullptr));
 
-    BMenuItem* selected = contextMenu->Go(screenPoint);
-    if (selected != nullptr) {
-        ShowConfigWindow();
+    BMenuItem* configItem = new BMenuItem("Config", new BMessage(MSG_OPEN_CONFIG));
+    if (gContextMenuHandler != nullptr) {
+        configItem->SetTarget(gContextMenuHandler);
     }
-    delete contextMenu;
+    contextMenu->AddItem(configItem);
+
+    contextMenu->Go(screenPoint, true /* deliversMessage */, false /* openAnyway */, true /* async */);
 }
 
 // Wake up the main loop on a new video frame arrival
@@ -779,6 +809,16 @@ int main(int argc, char* argv[]) {
     if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO | SDL_INIT_EVENTS) < 0) {
         fprintf(stderr, "SDL Could not initialize: %s\n", SDL_GetError());
         return 1;
+    }
+
+    // SDL_Init() brings up a BApplication (be_app) under the hood on Haiku.
+    // Register the context menu's async message target on it now so the
+    // right-click popup menu never blocks the SDL render loop (see
+    // ContextMenuHandler above).
+    gContextMenuHandler = new ContextMenuHandler();
+    if (be_app->Lock()) {
+        be_app->AddHandler(gContextMenuHandler);
+        be_app->Unlock();
     }
 
     // --- CHECK FOR MESA OPENGL DRIVER CAPABILITY AT RUNTIME ---
@@ -1105,6 +1145,15 @@ int main(int argc, char* argv[]) {
     if (gConfigWindow != nullptr) {
         if (gConfigWindow->Lock()) gConfigWindow->Quit();
         gConfigWindow = nullptr;
+    }
+
+    if (gContextMenuHandler != nullptr) {
+        if (be_app->Lock()) {
+            be_app->RemoveHandler(gContextMenuHandler);
+            be_app->Unlock();
+        }
+        delete gContextMenuHandler;
+        gContextMenuHandler = nullptr;
     }
 
     if (ctx.texture) SDL_DestroyTexture(ctx.texture);
