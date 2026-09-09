@@ -801,14 +801,26 @@ ConfigWindow::ConfigWindow()
 
     fPlaylistList = new BListView("playlist_list");
     fPlaylistList->SetSelectionMessage(new BMessage(MSG_CFG_PLAYLIST_SELECTED));
+    // Explicit, list-appropriate colors and font rather than relying on
+    // whatever a freshly-constructed BListView inherits by default --
+    // cheap insurance against a rendering (not data) bug, ruling that
+    // class of cause out explicitly instead of assuming defaults are fine.
+    fPlaylistList->SetViewColor(ui_color(B_LIST_BACKGROUND_COLOR));
+    fPlaylistList->SetLowColor(ui_color(B_LIST_BACKGROUND_COLOR));
+    fPlaylistList->SetHighColor(ui_color(B_LIST_ITEM_TEXT_COLOR));
+    fPlaylistList->SetFont(be_plain_font);
     fPlaylistScroll = new BScrollView("playlist_scroll", fPlaylistList,
         0 /* resizingMode */, 0 /* flags */, false /* horizontal */, true /* vertical */,
         B_FANCY_BORDER);
     // Collapsed by default (same as HaikuSuperMusicThingy's preset list) --
     // keeps the window compact until the user actually wants to browse
-    // files, rather than always reserving vertical space for it.
+    // files, rather than always reserving vertical space for it. Width is
+    // now explicitly constrained too (previously B_SIZE_UNSET), in case an
+    // empty BListView's own near-zero PreferredSize() was collapsing this
+    // row to an unreadable sliver before any items ever got a chance to
+    // establish a real width.
     fPlaylistScroll->Hide();
-    fPlaylistScroll->SetExplicitMinSize(BSize(B_SIZE_UNSET, 120));
+    fPlaylistScroll->SetExplicitMinSize(BSize(240, 120));
     fPlaylistScroll->SetExplicitMaxSize(BSize(B_SIZE_UNSET, 220));
     background->AddChild(fPlaylistScroll);
 
@@ -989,17 +1001,6 @@ void ConfigWindow::MessageReceived(BMessage* message) {
         case MSG_CFG_PLAYLIST_TOGGLE: {
             bool show = (fPlaylistToggle->Value() == B_CONTROL_ON);
             if (show) {
-                // Re-populate right as the panel opens, not just back at
-                // folder-pick/construction time. Confirmed on real
-                // hardware: the scan itself found every file correctly
-                // (matches the stderr summary), but the list rendered
-                // empty -- items added to a BListView before its window
-                // is actually Show()n/attached to app_server can end up
-                // with unresolved font/height metrics, present in the
-                // data model but effectively zero-height on screen.
-                // Rescanning here runs after the window is definitely
-                // shown, so it's not relying on figuring out exactly
-                // which of those earlier calls was too early.
                 PopulatePlaylistList(fPlaylistList, gAudioCfg.playlistFolder);
                 fPlaylistList->Invalidate();
                 fPlaylistScroll->Show();
@@ -1008,6 +1009,34 @@ void ConfigWindow::MessageReceived(BMessage* message) {
             }
             InvalidateLayout(true);
             ResizeToPreferred();
+
+            if (show) {
+                // Re-populating on open (rather than only at
+                // construction/folder-pick time) didn't fix the empty
+                // rendering on real hardware, so this is a geometry/
+                // render question now, not a data-population or timing
+                // one. Dump the widget's own state directly instead of
+                // guessing a third time -- queried after
+                // InvalidateLayout()/ResizeToPreferred() above so this
+                // reflects the settled layout, not a stale pre-resize one.
+                // A degenerate (near-zero) Bounds() here would confirm a
+                // layout/sizing cause; a normal-looking Bounds() with
+                // CountItems() > 0 would instead point at drawing/color.
+                // Run from Terminal to see this.
+                BRect listBounds = fPlaylistList->Bounds();
+                BRect scrollBounds = fPlaylistScroll->Bounds();
+                BRect scrollFrame = fPlaylistScroll->Frame();
+                fprintf(stderr, "[hTV] Playlist list: %d items, "
+                    "list Bounds=(%.0f,%.0f,%.0f,%.0f), "
+                    "scroll Bounds=(%.0f,%.0f,%.0f,%.0f), "
+                    "scroll Frame=(%.0f,%.0f,%.0f,%.0f), "
+                    "list IsHidden=%d, scroll IsHidden=%d\n",
+                    (int)fPlaylistList->CountItems(),
+                    listBounds.left, listBounds.top, listBounds.right, listBounds.bottom,
+                    scrollBounds.left, scrollBounds.top, scrollBounds.right, scrollBounds.bottom,
+                    scrollFrame.left, scrollFrame.top, scrollFrame.right, scrollFrame.bottom,
+                    (int)fPlaylistList->IsHidden(), (int)fPlaylistScroll->IsHidden());
+            }
             break;
         }
         case MSG_CFG_PLAYLIST_SELECTED: {
@@ -1310,7 +1339,7 @@ int main(int argc, char* argv[]) {
 
 	{
 	    const char* targetUrl = "https://raw.githubusercontent.com/ablyssx74/hTV/refs/heads/main/VERSION";
-	    const char* localVersion = "v1.2.2";
+	    const char* localVersion = "v1.2.3";
 	
 	    char updateCmd[1024];
 	    snprintf(updateCmd, sizeof(updateCmd),
