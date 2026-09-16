@@ -3,6 +3,7 @@
  * All rights reserved. Distributed under the terms of the MIT license.
  */
  
+#include <curl/curl.h>
 #include <SDL2/SDL.h>
 #include <SDL2/SDL_opengl.h>
 #include <mpv/client.h>
@@ -48,6 +49,7 @@
 #include <FilePanel.h>
 #include <Entry.h>
 #include <Messenger.h>
+#include <Notification.h>
 
 // Playlist folder scanning/shuffling -- same std::filesystem-based approach
 // HaikuSuperMusicThingy uses for its own MilkDrop preset list.
@@ -1166,7 +1168,63 @@ void UpdatePlayerWindowTitle(PlayerCtx* ctx) {
     if (pathStr) mpv_free(pathStr);
 }
 
+// =========================================================================
+// NATIVE ASYNCHRONOUS UPDATE ENGINE (libcurl)
+// =========================================================================
+static size_t UpdateCheckWriteCallback(void* contents, size_t size, size_t nmemb, void* userp) {
+    ((std::string*)userp)->append((char*)contents, size * nmemb);
+    return size * nmemb;
+}
+
+static int32 BackgroundUpdateChecker(void* data) {
+    const char* targetUrl = "https://raw.githubusercontent.com/ablyssx74/hTV/refs/heads/main/VERSION";
+    const char* localVersion = "v1.2.6";
+
+    std::string buffer;
+    CURL* curl = curl_easy_init();
+    if (curl == nullptr) {
+        return B_ERROR;
+    }
+
+    curl_easy_setopt(curl, CURLOPT_URL, targetUrl);
+    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, UpdateCheckWriteCallback);
+    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &buffer);
+    curl_easy_setopt(curl, CURLOPT_USERAGENT, "hTV/1.0");
+    curl_easy_setopt(curl, CURLOPT_TIMEOUT, 10L);
+    curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
+
+    curl_easy_perform(curl);
+    // NOTE: curl_easy_cleanup() reproducibly hangs/crashes on the current Haiku
+    // libcurl build. This runs once per launch, so intentionally leaking the
+    // single CURL handle (reclaimed at process exit) is a fine tradeoff versus
+    // losing the update check entirely. Revisit if a Haiku curl update fixes it.
+    // curl_easy_cleanup(curl);
+
+    BString remoteVersionStr = buffer.c_str();
+    remoteVersionStr.Trim();
+
+    if (remoteVersionStr.Length() > 0 && remoteVersionStr != localVersion) {
+        BNotification updateAlert(B_INFORMATION_NOTIFICATION);
+        updateAlert.SetGroup("hTV");
+        updateAlert.SetTitle("Update Available");
+
+        BString alertContent;
+        alertContent << "A newer version of hTV is available! (" << remoteVersionStr << ")";
+        updateAlert.SetContent(alertContent.String());
+
+        updateAlert.Send();
+    }
+
+    return B_OK;
+}
+
 int main(int argc, char* argv[]) {
+    // libcurl's global init is NOT thread-safe against other concurrently running
+    // threads in the process. Doing it once here, from the main thread, before any
+    // background thread ever calls curl_easy_init(), avoids the implicit lazy
+    // global init racing with the app's other background threads later.
+    curl_global_init(CURL_GLOBAL_DEFAULT);
+
     setenv("BE_APP_SIGNATURE", "application/x-vnd.hTV", 1);
 
     const char* streamUrl = "";
@@ -1326,17 +1384,10 @@ int main(int argc, char* argv[]) {
     bool needsRender = false; 
 
 	{
-	    const char* targetUrl = "https://raw.githubusercontent.com/ablyssx74/hTV/refs/heads/main/VERSION";
-	    const char* localVersion = "v1.2.5";
-	
-	    char updateCmd[1024];
-	    snprintf(updateCmd, sizeof(updateCmd),
-	        "(REMOTE_V=$(curl -sL \"%s\" | tr -d '\\r\\n'); "
-	        "if [ ! -z \"$REMOTE_V\" ] && [ \"$REMOTE_V\" != \"%s\" ]; then "
-	        "notify --title \"Update Available\" --group \"hTV\" "
-	        "\"A newer version of hTV is available! ($REMOTE_V)\"; fi) &",
-	        targetUrl, localVersion);	
-	    system(updateCmd);
+	    thread_id updateThread = spawn_thread(BackgroundUpdateChecker, "htv_update_checker", B_LOW_PRIORITY, nullptr);
+	    if (updateThread >= B_OK) {
+	        resume_thread(updateThread);
+	    }
 	}
 
     while (ctx.isRunning) {
@@ -1532,6 +1583,7 @@ int main(int argc, char* argv[]) {
     mpv_destroy(ctx.mpv);
     SDL_DestroyWindow(ctx.window);
     SDL_Quit();
+    curl_global_cleanup();
 
     return 0;
 }
