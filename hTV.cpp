@@ -1178,7 +1178,7 @@ static size_t UpdateCheckWriteCallback(void* contents, size_t size, size_t nmemb
 
 static int32 BackgroundUpdateChecker(void* data) {
     const char* targetUrl = "https://raw.githubusercontent.com/ablyssx74/hTV/refs/heads/main/VERSION";
-    const char* localVersion = "v1.2.6";
+    const char* localVersion = "v1.2.7";
 
     std::string buffer;
     CURL* curl = curl_easy_init();
@@ -1194,11 +1194,7 @@ static int32 BackgroundUpdateChecker(void* data) {
     curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
 
     curl_easy_perform(curl);
-    // NOTE: curl_easy_cleanup() reproducibly hangs/crashes on the current Haiku
-    // libcurl build. This runs once per launch, so intentionally leaking the
-    // single CURL handle (reclaimed at process exit) is a fine tradeoff versus
-    // losing the update check entirely. Revisit if a Haiku curl update fixes it.
-    // curl_easy_cleanup(curl);
+    curl_easy_cleanup(curl);
 
     BString remoteVersionStr = buffer.c_str();
     remoteVersionStr.Trim();
