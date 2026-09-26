@@ -1,0 +1,9 @@
+# Haiku (Makefile) build artifacts
+*.o
+*.rsrc
+*.hpkg
+/hTV
+/build_package/
+
+# Linux (CMake) build artifacts
+/build/

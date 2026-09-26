@@ -1,13 +1,13 @@
 # hTV Build Script (Native Haiku OS Conversion)
 SHELL := /bin/bash
 GUI_TARGET = hTV
-VERSION = 1.2.7
+VERSION = 1.3.0
 REVISION = 1
 PACKAGE_DIR := build/package
 DUMMY_PC_PATH := $(shell pwd)/build/pkgconfig
 
 # Source mapping parameters
-GUI_SRCS = hTV.cpp
+GUI_SRCS = hTV.cpp audio_fx.cpp
 GUI_OBJS = $(GUI_SRCS:.cpp=.o)
 
 # Check if an rdef file exists, otherwise skip resource compilation

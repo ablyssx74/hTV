@@ -12,14 +12,18 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/stat.h>
 #include <new>
 #include <math.h>
+#include <sys/stat.h>
 
 // Native Haiku (Be API) interface kit -- used for the right-click "Config"
 // popup menu and the Audio Configuration window (15-band EQ / reverb / FX).
 // SDL already brings up a BApplication under the hood on Haiku, so it's
 // safe to create additional BWindows/BPopUpMenus from application code.
+//
+// This is the Haiku build; the Linux port (Qt widgets, X11/Wayland) lives
+// entirely in linux/hTV_linux.cpp and linux/linux_config_ui.h/.cpp, built
+// via CMakeLists.txt instead of this file's Makefile.
 #include <Application.h>
 #include <Handler.h>
 #include <Window.h>
@@ -61,6 +65,11 @@
 #include <ctime>
 #include <cctype>
 
+// Shared, platform-independent audio config (15-band EQ, limiter, reverb,
+// chorus) -- see audio_fx.h/.cpp. Both this Haiku UI and the Linux/Qt UI in
+// linux/linux_config_ui.cpp drive the same gAudioCfg.
+#include "audio_fx.h"
+
 // Unified state tracker containing both graphics backend slots
 struct PlayerCtx {
     SDL_Window* window;
@@ -75,190 +84,7 @@ struct PlayerCtx {
     int texWidth, texHeight;
 };
 
-// =============================================================================
-// AUDIO CONFIGURATION -- 15-Band EQ, Reverb & FX
-// =============================================================================
-// This mirrors the 15-band graphic EQ found in ablyss's HaikuSuperMusicThingy
-// (https://github.com/ablyssx74/HaikuSuperMusicThingy) -- same 15 ISO-ish
-// band centers, same +/-15dB range, same "equalizer=f=..:width_type=o:w=1:g=.."
-// mpv/ffmpeg filter chain construction -- but settings are persisted using a
-// flat BMessage (Flatten()/Unflatten() to a single settings file), the same
-// technique hDesktop uses (https://github.com/ablyssx74/hDesktop), instead of
-// HaikuSuperMusicThingy's JSON config file.
-//
-// The EQ is paired with a mastering limiter (In/Threshold/Release), same as
-// HaikuSuperMusicThingy's own `alimiter` stage chained after its EQ bands.
-//
-// mpv/ffmpeg has no dedicated "reverb" audio filter, so the Reverb section
-// below builds a tuned ffmpeg `aecho` chain -- the technique mpv's own manual
-// recommends for adding echo/reverb-style ambience -- with Room/Hall/Plate/
-// Canyon presets, plus a tunable `chorus` filter as an extra bonus effect.
-
-// mpv client handle shared with the audio-config UI thread. libmpv's client
-// API (mpv_set_property_string etc.) is documented as thread-safe, so the
-// ConfigWindow (which runs on its own BWindow looper thread) can push filter
-// changes directly without any extra locking.
-static mpv_handle* g_mpv = nullptr;
-
-struct AudioConfig {
-    bool  eqEnabled = false;
-    float eqBands[15] = {0.0f};
-
-    // Mastering limiter -- same In/Threshold/Release controls
-    // HaikuSuperMusicThingy pairs with its EQ (an ffmpeg `alimiter` chained
-    // right after the 15 equalizer bands), active whenever the EQ is.
-    float limitInput = 0.0f;      // -20..20 dB
-    float limitThreshold = 0.0f;  // -20..0 dB
-    float limitRelease = 100.0f;  // 10..1000 ms
-
-    bool  reverbEnabled = false;
-    int32 reverbType = 0;          // 0 = Room, 1 = Hall, 2 = Plate, 3 = Canyon
-    float reverbRoomSize = 50.0f;  // 0..100
-    float reverbDamping = 50.0f;   // 0..100
-    float reverbWet = 30.0f;       // 0..100
-
-    bool  chorusEnabled = false;
-    float chorusRate = 30.0f;   // 0..100
-    float chorusDepth = 40.0f;  // 0..100
-    float chorusMix = 50.0f;    // 0..100
-
-    // Playlist folder + random-play toggle. Grouped into this same struct
-    // and settings file as the audio FX config above for simplicity --
-    // hTV persists everything through one flat BMessage, so there's no
-    // separate settings file to keep in sync.
-    std::string playlistFolder;   // empty = none chosen yet
-    bool        randomPlay = false;
-};
-
-static AudioConfig gAudioCfg;
-
-// 15-band frequency centers, identical to HaikuSuperMusicThingy's mbeq_1197
-// compatible layout.
-static const float kEqFrequencies[15] = {
-    50, 100, 156, 220, 311, 440, 622, 880,
-    1250, 1750, 2500, 3500, 5000, 10000, 20000
-};
-
-static const char* kEqFreqLabels[15] = {
-    "50", "100", "156", "220", "311", "440", "622", "880",
-    "1k2", "1k7", "2k5", "3k5", "5k", "10k", "20k"
-};
-
-// EQ curve presets, matching the ones shipped with HaikuSuperMusicThingy.
-static const float kEqPresetFlat[15] = {
-    0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
-    0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0
-};
-static const float kEqPresetRock[15] = {
-    4.0, 3.5, 3.0, 2.5, 2.0, 1.0, -1.0, -1.0,
-    0.0, 1.0, 1.5, 2.0, 2.5, 3.5, 4.0
-};
-static const float kEqPresetJazz[15] = {
-    3.0, 2.5, 2.0, 1.5, 1.0, 2.0, -1.0, -1.0,
-    -0.5, 0.0, 0.5, 1.0, 1.5, 2.5, 3.0
-};
-static const float kEqPresetBass[15] = {
-    11.0, 9.0, 4.0, 2.0, 1.0, 1.0, 0.0, 0.0,
-    0.0, 0.0, 1.0, 3.0, 4.0, 7.0, 9.0
-};
-
 static const char* kSettingsFileName = "hTV_settings";
-
-// Builds the full mpv `af` filter-chain string from the current AudioConfig.
-static void BuildAudioFilterChain(BString& chain) {
-    chain = "";
-
-    if (gAudioCfg.eqEnabled) {
-        for (int i = 0; i < 15; i++) {
-            BString band;
-            band.SetToFormat("equalizer=f=%.0f:width_type=o:w=1:g=%.2f,",
-                              kEqFrequencies[i], gAudioCfg.eqBands[i]);
-            chain << band;
-        }
-
-        // Mastering limiter, chained right after the EQ bands -- same
-        // In/Threshold/Release controls and dB-to-linear-gain math
-        // HaikuSuperMusicThingy uses for its own `alimiter` stage.
-        float inputGain = pow(10.0f, gAudioCfg.limitInput / 20.0f);
-        float limitVal  = pow(10.0f, gAudioCfg.limitThreshold / 20.0f);
-        if (limitVal <= 0.001f) limitVal = 0.001f;
-        if (inputGain <= 0.001f) inputGain = 0.001f;
-
-        BString limiter;
-        limiter.SetToFormat("alimiter=level_in=%.2f:limit=%.2f:release=%.2f,",
-                             inputGain, limitVal, gAudioCfg.limitRelease);
-        chain << limiter;
-    }
-
-    if (gAudioCfg.reverbEnabled) {
-        // aecho=in_gain:out_gain:delays:decays
-        // "Room size" scales the tap delays, "damping" trims the decay of
-        // each successive tap (simulating high-frequency absorption), and
-        // "wet level" blends the reverb signal in/out.
-        float wet   = gAudioCfg.reverbWet / 100.0f;      // 0..1
-        float damp  = gAudioCfg.reverbDamping / 100.0f;  // 0..1
-        float roomScale = 0.5f + (gAudioCfg.reverbRoomSize / 100.0f) * 1.5f; // 0.5x..2.0x
-
-        struct ReverbProfile { float delayMs[3]; float decay[3]; };
-        static const ReverbProfile kProfiles[4] = {
-            { {60.0f, 100.0f, 150.0f}, {0.35f, 0.25f, 0.15f} },   // Room
-            { {150.0f, 220.0f, 340.0f}, {0.55f, 0.45f, 0.30f} },  // Hall
-            { {30.0f, 55.0f, 90.0f},   {0.45f, 0.35f, 0.25f} },   // Plate
-            { {280.0f, 480.0f, 700.0f}, {0.55f, 0.45f, 0.35f} }   // Canyon
-        };
-        const ReverbProfile& profile = kProfiles[gAudioCfg.reverbType % 4];
-
-        BString delays, decays;
-        for (int i = 0; i < 3; i++) {
-            BString d, g;
-            d.SetToFormat("%.0f", profile.delayMs[i] * roomScale);
-            g.SetToFormat("%.3f", profile.decay[i] * (1.0f - damp * 0.6f));
-            if (i > 0) { delays << "|"; decays << "|"; }
-            delays << d;
-            decays << g;
-        }
-
-        float inGain  = 0.6f + wet * 0.3f;
-        float outGain = 0.5f + wet * 0.5f;
-
-        BString reverb;
-        reverb.SetToFormat("aecho=%.2f:%.2f:%s:%s,", inGain, outGain,
-                            delays.String(), decays.String());
-        chain << reverb;
-    }
-
-    if (gAudioCfg.chorusEnabled) {
-        // chorus=in_gain:out_gain:delays:decays:speeds:depths -- three
-        // slightly-detuned voices (the same base delay/decay spread as
-        // ffmpeg's own documented chorus example), with Rate/Depth/Mix
-        // scaling the modulation speed, modulation depth, and wet/dry
-        // balance respectively.
-        float rate  = 0.1f + (gAudioCfg.chorusRate / 100.0f) * 2.9f;   // 0.1..3.0 Hz
-        float depth = 1.0f + (gAudioCfg.chorusDepth / 100.0f) * 9.0f;  // 1..10 ms
-        float mix   = gAudioCfg.chorusMix / 100.0f;                    // 0..1
-        float inGain  = 0.5f + mix * 0.2f;
-        float outGain = 0.5f + mix * 0.4f;
-
-        BString chorus;
-        chorus.SetToFormat("chorus=%.2f:%.2f:55|60|40:0.4|0.32|0.3:%.2f|%.2f|%.2f:%.2f|%.2f|%.2f,",
-                            inGain, outGain,
-                            rate, rate * 1.15f, rate * 0.7f,
-                            depth, depth * 0.9f, depth * 1.1f);
-        chain << chorus;
-    }
-
-    if (chain.Length() > 0 && chain[chain.Length() - 1] == ',') {
-        chain.Truncate(chain.Length() - 1);
-    }
-}
-
-// Pushes the current AudioConfig to mpv as the "af" audio filter chain.
-static void ApplyAudioFilters(mpv_handle* mpv) {
-    if (!mpv) return;
-    BString chain;
-    BuildAudioFilterChain(chain);
-    mpv_set_property_string(mpv, "af", chain.String());
-}
 
 // Persists gAudioCfg to a single flat BMessage on disk, the same way
 // hDesktop flattens its settings BMessage straight to a BFile (repeated
@@ -1178,7 +1004,7 @@ static size_t UpdateCheckWriteCallback(void* contents, size_t size, size_t nmemb
 
 static int32 BackgroundUpdateChecker(void* data) {
     const char* targetUrl = "https://raw.githubusercontent.com/ablyssx74/hTV/refs/heads/main/VERSION";
-    const char* localVersion = "v1.2.7";
+    const char* localVersion = "v1.3.0";
 
     std::string buffer;
     CURL* curl = curl_easy_init();
@@ -1275,6 +1101,21 @@ int main(int argc, char* argv[]) {
         740, 520,
         (hasHardwareDriver ? SDL_WINDOW_OPENGL : 0) | SDL_WINDOW_RESIZABLE | SDL_WINDOW_SHOWN
     );
+
+    if (!ctx.window && hasHardwareDriver) {
+        // Requesting an OpenGL-capable window outright failed (as opposed to
+        // the window succeeding but context creation failing below) --
+        // some video driver truly has no GL support. Retry once without it
+        // instead of giving up, falling back to the software blit path.
+        fprintf(stderr, "OpenGL window creation failed: %s\nRetrying without OpenGL...\n", SDL_GetError());
+        hasHardwareDriver = false;
+        ctx.window = SDL_CreateWindow(
+            ctx.currentTitle,
+            SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
+            740, 520,
+            SDL_WINDOW_RESIZABLE | SDL_WINDOW_SHOWN
+        );
+    }
 
     if (!ctx.window) {
         fprintf(stderr, "Failed to create window wrapper: %s\n", SDL_GetError());
