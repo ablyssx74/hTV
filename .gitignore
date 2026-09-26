@@ -7,3 +7,9 @@
 
 # Linux (CMake) build artifacts
 /build/
+
+# Arch/CachyOS packaging artifacts (makepkg -si)
+/pkg/
+/src/
+*.pkg.tar.*
+.SRCINFO
