@@ -20,6 +20,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <clocale>
 
 #include "audio_fx.h"
 #include "linux_config_ui.h"
@@ -174,6 +175,13 @@ int main(int argc, char* argv[]) {
             ctx.renderer = SDL_CreateRenderer(ctx.window, -1, SDL_RENDERER_SOFTWARE);
         }
     }
+
+    // Belt-and-suspenders: linux_config_ui.cpp already restores LC_NUMERIC
+    // to "C" right after constructing QApplication (see the comment there
+    // for why Qt breaks it in the first place), but mpv is uncompromising
+    // about this, so make sure it's correct right here too before handing
+    // control to it.
+    setlocale(LC_NUMERIC, "C");
 
     ctx.mpv = mpv_create();
     if (!ctx.mpv) {

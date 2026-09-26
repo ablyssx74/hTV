@@ -23,6 +23,7 @@
 #include <thread>
 #include <atomic>
 #include <chrono>
+#include <clocale>
 
 namespace {
 
@@ -361,6 +362,18 @@ void StartLinuxAudioUI() {
     gQtThread = std::thread([]() {
         int argc = 0;
         QApplication app(argc, nullptr);
+
+        // QApplication's constructor calls setlocale(LC_ALL, "") to pick up
+        // the user's system locale for text rendering -- which, on any
+        // locale where the decimal separator isn't ".", also changes
+        // LC_NUMERIC. setlocale() is process-global, not per-thread, so
+        // this clobbers it for the whole process even though Qt runs on
+        // its own thread here -- and libmpv refuses to initialize unless
+        // LC_NUMERIC is "C" (it parses numeric strings assuming it). Set
+        // it back immediately so mpv_create() on the main thread succeeds
+        // regardless of the user's locale.
+        setlocale(LC_NUMERIC, "C");
+
         gQtContext = &app;
         gQtReady.store(true);
         app.exec();
