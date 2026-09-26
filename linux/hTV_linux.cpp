@@ -347,21 +347,11 @@ int main(int argc, char* argv[]) {
                     } else if (event.button.button == SDL_BUTTON_MIDDLE) {
                         mpv_command_string(ctx.mpv, "cycle mute");
                     } else if (event.button.button == SDL_BUTTON_RIGHT) {
-                        int windowX = 0, windowY = 0;
-                        SDL_GetWindowPosition(ctx.window, &windowX, &windowY);
-                        // SDL_GetWindowPosition() is unreliable under Wayland
-                        // (a Wayland client generally can't query its own
-                        // global screen position at all, unlike X11) -- this
-                        // print exists so a report of "right-click does
-                        // nothing" can be told apart from "the menu appeared
-                        // somewhere other than expected": if windowX/windowY
-                        // print as 0,0 here on a windowed (non-fullscreen)
-                        // session, that confirms this SDL limitation instead
-                        // of a bug in the click handling itself.
-                        fprintf(stderr, "[hTV] Right-click at window-relative (%d, %d), "
-                            "SDL_GetWindowPosition() = (%d, %d)\n",
-                            event.button.x, event.button.y, windowX, windowY);
-                        ShowLinuxContextMenu(windowX + event.button.x, windowY + event.button.y);
+                        // Opens the Config window directly rather than a
+                        // popup menu -- see linux_config_ui.h/.cpp for why
+                        // (a Wayland "grabbing popup" restriction confirmed
+                        // on real hardware).
+                        ShowLinuxContextMenu();
                     }
                     break;
                 }
