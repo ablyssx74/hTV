@@ -211,7 +211,8 @@ int main(int argc, char* argv[]) {
     mpv_set_option_string(ctx.mpv, "force-seekable", "yes");
     mpv_set_option_string(ctx.mpv, "video-sync", "audio");
     mpv_set_option_string(ctx.mpv, "audio-pitch-correction", "no");
-    mpv_set_option_string(ctx.mpv, "speed", "1.05");
+    // Speed fix not needed on linux
+    mpv_set_option_string(ctx.mpv, "speed", "0.00");
 
     if (mpv_initialize(ctx.mpv) < 0) {
         fprintf(stderr, "Failed to initialize mpv client core\n");
