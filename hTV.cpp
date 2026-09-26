@@ -13,14 +13,16 @@
 #include <string.h>
 #include <new>
 #include <math.h>
-
-#ifdef __HAIKU__
 #include <sys/stat.h>
 
 // Native Haiku (Be API) interface kit -- used for the right-click "Config"
 // popup menu and the Audio Configuration window (15-band EQ / reverb / FX).
 // SDL already brings up a BApplication under the hood on Haiku, so it's
 // safe to create additional BWindows/BPopUpMenus from application code.
+//
+// This is the Haiku build; the Linux port (Qt widgets, X11/Wayland) lives
+// entirely in linux/hTV_linux.cpp and linux/linux_config_ui.h/.cpp, built
+// via CMakeLists.txt instead of this file's Makefile.
 #include <Application.h>
 #include <Handler.h>
 #include <Window.h>
@@ -43,16 +45,10 @@
 #include <Rect.h>
 #include <Point.h>
 #include <Size.h>
-#else
-// Linux build: the Config window and its context menu are Qt widgets,
-// running on their own thread (see linux_config_ui.cpp/.h for why that's
-// safe and non-blocking) -- matching KDE/Plasma's own look and theme.
-#include "linux_config_ui.h"
-#endif
 
 // Shared, platform-independent audio config (15-band EQ, limiter, reverb,
-// chorus) -- see audio_fx.h/.cpp. The Haiku-specific UI below and the
-// Linux/Qt UI in linux_config_ui.cpp both drive the same gAudioCfg.
+// chorus) -- see audio_fx.h/.cpp. Both this Haiku UI and the Linux/Qt UI in
+// linux/linux_config_ui.cpp drive the same gAudioCfg.
 #include "audio_fx.h"
 
 // Unified state tracker containing both graphics backend slots
@@ -68,8 +64,6 @@ struct PlayerCtx {
     char currentTitle[512]; 
     int texWidth, texHeight;
 };
-
-#ifdef __HAIKU__
 
 static const char* kSettingsFileName = "hTV_settings";
 
@@ -590,8 +584,6 @@ static void ShowMainContextMenu(BPoint screenPoint) {
     contextMenu->Go(screenPoint, true /* deliversMessage */, false /* openAnyway */, true /* async */);
 }
 
-#endif // __HAIKU__
-
 // Wake up the main loop on a new video frame arrival
 void on_mpv_render_update(void* ctx) {
     SDL_Event event;
@@ -640,9 +632,7 @@ void UpdatePlayerWindowTitle(PlayerCtx* ctx) {
 }
 
 int main(int argc, char* argv[]) {
-#ifdef __HAIKU__
     setenv("BE_APP_SIGNATURE", "application/x-vnd.hTV", 1);
-#endif
 
     const char* streamUrl = "";
     if (argc > 1 && argv[1] != nullptr) {
@@ -654,7 +644,6 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
-#ifdef __HAIKU__
     // SDL_Init() brings up a BApplication (be_app) under the hood on Haiku.
     // Register the context menu's async message target on it now so the
     // right-click popup menu never blocks the SDL render loop (see
@@ -664,23 +653,10 @@ int main(int argc, char* argv[]) {
         be_app->AddHandler(gContextMenuHandler);
         be_app->Unlock();
     }
-#else
-    // Bring up the Qt thread (its own QApplication + event loop) so the
-    // right-click Config menu/window are ready the moment they're needed --
-    // see linux_config_ui.cpp for why this runs on its own thread.
-    StartLinuxAudioUI();
-#endif
 
     // --- CHECK FOR MESA OPENGL DRIVER CAPABILITY AT RUNTIME ---
-#ifdef __HAIKU__
     struct stat mesaBuffer;
     bool hasHardwareDriver = (stat("/boot/system/add-ons/opengl/egl_vendor.d/libEGL_mesa.so", &mesaBuffer) == 0);
-#else
-    // Virtually every Linux desktop (X11 or Wayland) has a working Mesa or
-    // proprietary GL/EGL driver; just try hardware GL directly and fall back
-    // to the software path below if context creation actually fails.
-    bool hasHardwareDriver = true;
-#endif
 
     PlayerCtx ctx;
     ctx.isRunning = true;
@@ -834,23 +810,12 @@ int main(int argc, char* argv[]) {
 	    const char* localVersion = "v1.2.0";
 	
 	    char updateCmd[1024];
-#ifdef __HAIKU__
 	    snprintf(updateCmd, sizeof(updateCmd),
 	        "(REMOTE_V=$(curl -sL \"%s\" | tr -d '\\r\\n'); "
 	        "if [ ! -z \"$REMOTE_V\" ] && [ \"$REMOTE_V\" != \"%s\" ]; then "
 	        "notify --title \"Update Available\" --group \"hTV\" "
 	        "\"A newer version of hTV is available! ($REMOTE_V)\"; fi) &",
 	        targetUrl, localVersion);
-#else
-	    // notify-send is the freedesktop-standard desktop notifier -- on KDE
-	    // it's routed through KNotify, no extra setup needed.
-	    snprintf(updateCmd, sizeof(updateCmd),
-	        "(REMOTE_V=$(curl -sL \"%s\" | tr -d '\\r\\n'); "
-	        "if [ ! -z \"$REMOTE_V\" ] && [ \"$REMOTE_V\" != \"%s\" ]; then "
-	        "notify-send \"hTV Update Available\" "
-	        "\"A newer version of hTV is available! ($REMOTE_V)\"; fi) &",
-	        targetUrl, localVersion);
-#endif
 	    int updateCmdResult = system(updateCmd);
 	    (void)updateCmdResult;
 	}
@@ -923,12 +888,8 @@ int main(int argc, char* argv[]) {
                     } else if (event.button.button == SDL_BUTTON_RIGHT) {
                         int windowX = 0, windowY = 0;
                         SDL_GetWindowPosition(ctx.window, &windowX, &windowY);
-#ifdef __HAIKU__
                         BPoint screenPoint(windowX + event.button.x, windowY + event.button.y);
                         ShowMainContextMenu(screenPoint);
-#else
-                        ShowLinuxContextMenu(windowX + event.button.x, windowY + event.button.y);
-#endif
                     }
                     break;
                 }
@@ -1030,7 +991,6 @@ int main(int argc, char* argv[]) {
         }
     }
 
-#ifdef __HAIKU__
     if (gConfigWindow != nullptr) {
         if (gConfigWindow->Lock()) gConfigWindow->Quit();
         gConfigWindow = nullptr;
@@ -1044,9 +1004,6 @@ int main(int argc, char* argv[]) {
         delete gContextMenuHandler;
         gContextMenuHandler = nullptr;
     }
-#else
-    StopLinuxAudioUI();
-#endif
 
     if (ctx.texture) SDL_DestroyTexture(ctx.texture);
     if (ctx.renderer) SDL_DestroyRenderer(ctx.renderer);

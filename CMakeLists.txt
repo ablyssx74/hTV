@@ -37,9 +37,14 @@ find_package(OpenGL REQUIRED)
 find_package(Threads REQUIRED)
 
 add_executable(hTV
-    hTV.cpp
+    linux/hTV_linux.cpp
     audio_fx.cpp
-    linux_config_ui.cpp
+    linux/linux_config_ui.cpp
+)
+
+target_include_directories(hTV PRIVATE
+    ${CMAKE_SOURCE_DIR}
+    ${CMAKE_SOURCE_DIR}/linux
 )
 
 target_compile_options(hTV PRIVATE -Wall)
