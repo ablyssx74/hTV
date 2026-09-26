@@ -7,6 +7,7 @@
 #include "audio_fx.h"
 
 #include <QApplication>
+#include <QGuiApplication>
 #include <QWidget>
 #include <QVBoxLayout>
 #include <QHBoxLayout>
@@ -400,14 +401,42 @@ void ShowLinuxConfigWindow() {
 }
 
 void ShowLinuxContextMenu(int screenX, int screenY) {
-    if (!gQtContext) return;
+    if (!gQtContext) {
+        fprintf(stderr, "[hTV] Right-click ignored: Qt UI thread isn't ready yet\n");
+        return;
+    }
+    fprintf(stderr, "[hTV] Right-click received, requesting context menu at (%d, %d)\n",
+            screenX, screenY);
     QMetaObject::invokeMethod(gQtContext, [screenX, screenY]() {
         // QMenu::exec() blocks, but only this Qt-thread event loop -- SDL's
         // main loop and mpv rendering run on a completely separate thread
         // and are unaffected, so the video never freezes behind this menu.
         QMenu menu;
         QAction* configAction = menu.addAction("Config");
-        QAction* chosen = menu.exec(QPoint(screenX, screenY));
+
+        QAction* chosen = nullptr;
+        // Wayland's security model doesn't let a client place a window at
+        // an arbitrary global screen coordinate the way X11 does -- and
+        // this QMenu has no relation to hTV's separate SDL window to anchor
+        // an xdg_popup to (they're two independent toolkits, each with
+        // their own connection to the compositor), so a requested absolute
+        // position can't be honored there the way it can on X11. Let the
+        // compositor place it instead of asking for something Wayland will
+        // just ignore (or, in the worst case, that produces a window this
+        // codebase's own earlier testing never actually exercised -- CI/
+        // sandboxes here only have Qt's "offscreen" platform, which doesn't
+        // emulate real Wayland popup placement rules at all).
+        if (QGuiApplication::platformName() == QLatin1String("wayland")) {
+            fprintf(stderr, "[hTV] Running under Wayland -- letting the compositor place the "
+                "context menu instead of the requested position\n");
+            chosen = menu.exec();
+        } else {
+            chosen = menu.exec(QPoint(screenX, screenY));
+        }
+
+        fprintf(stderr, "[hTV] Context menu closed (%s)\n",
+                chosen ? "Config selected" : "dismissed without a selection");
+
         if (chosen == configAction) {
             EnsureConfigWindow();
             gConfigWindow->show();
