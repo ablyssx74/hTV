@@ -7,7 +7,6 @@
 #include "audio_fx.h"
 
 #include <QApplication>
-#include <QGuiApplication>
 #include <QWidget>
 #include <QVBoxLayout>
 #include <QHBoxLayout>
@@ -16,7 +15,6 @@
 #include <QComboBox>
 #include <QSlider>
 #include <QLabel>
-#include <QMenu>
 #include <QSettings>
 #include <QMetaObject>
 #include <QCloseEvent>
@@ -400,50 +398,34 @@ void ShowLinuxConfigWindow() {
     }, Qt::QueuedConnection);
 }
 
-void ShowLinuxContextMenu(int screenX, int screenY) {
+// A right-click here used to pop a one-item QMenu ("Config"), the same
+// shape as the Haiku build's BPopUpMenu -- but confirmed broken on real
+// KDE/Wayland hardware with:
+//
+//   qt.qpa.wayland: Failed to create grabbing popup. Ensure popup
+//   QWidgetWindow(..., name="QMenuClassWindow") has a transientParent set
+//   and that parent window has received input.
+//
+// QMenu is a Wayland "grabbing popup" (an xdg_popup under the hood), and
+// the protocol requires one to be anchored to a parent xdg_surface that
+// itself just received the real input event that triggered the popup.
+// SDL's window caught that click, not any window Qt knows about -- hTV's
+// video window and this Qt UI are two independent toolkits with separate
+// connections to the compositor, so there's no such parent to give it (X11
+// has no equivalent restriction, which is why this worked there and even
+// in this codebase's own sandbox testing, which only ever had Qt's
+// "offscreen" platform available -- neither exercises real Wayland
+// popup-placement/grab rules). A plain top-level window (like the Config
+// window itself) has no such requirement, so skip the menu and open it
+// directly -- with only one item in it, the menu wasn't adding anything
+// a direct open doesn't already provide.
+void ShowLinuxContextMenu() {
     if (!gQtContext) {
         fprintf(stderr, "[hTV] Right-click ignored: Qt UI thread isn't ready yet\n");
         return;
     }
-    fprintf(stderr, "[hTV] Right-click received, requesting context menu at (%d, %d)\n",
-            screenX, screenY);
-    QMetaObject::invokeMethod(gQtContext, [screenX, screenY]() {
-        // QMenu::exec() blocks, but only this Qt-thread event loop -- SDL's
-        // main loop and mpv rendering run on a completely separate thread
-        // and are unaffected, so the video never freezes behind this menu.
-        QMenu menu;
-        QAction* configAction = menu.addAction("Config");
-
-        QAction* chosen = nullptr;
-        // Wayland's security model doesn't let a client place a window at
-        // an arbitrary global screen coordinate the way X11 does -- and
-        // this QMenu has no relation to hTV's separate SDL window to anchor
-        // an xdg_popup to (they're two independent toolkits, each with
-        // their own connection to the compositor), so a requested absolute
-        // position can't be honored there the way it can on X11. Let the
-        // compositor place it instead of asking for something Wayland will
-        // just ignore (or, in the worst case, that produces a window this
-        // codebase's own earlier testing never actually exercised -- CI/
-        // sandboxes here only have Qt's "offscreen" platform, which doesn't
-        // emulate real Wayland popup placement rules at all).
-        if (QGuiApplication::platformName() == QLatin1String("wayland")) {
-            fprintf(stderr, "[hTV] Running under Wayland -- letting the compositor place the "
-                "context menu instead of the requested position\n");
-            chosen = menu.exec();
-        } else {
-            chosen = menu.exec(QPoint(screenX, screenY));
-        }
-
-        fprintf(stderr, "[hTV] Context menu closed (%s)\n",
-                chosen ? "Config selected" : "dismissed without a selection");
-
-        if (chosen == configAction) {
-            EnsureConfigWindow();
-            gConfigWindow->show();
-            gConfigWindow->raise();
-            gConfigWindow->activateWindow();
-        }
-    }, Qt::QueuedConnection);
+    fprintf(stderr, "[hTV] Right-click received, opening Config window\n");
+    ShowLinuxConfigWindow();
 }
 
 void StopLinuxAudioUI() {
