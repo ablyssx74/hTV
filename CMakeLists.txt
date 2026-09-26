@@ -62,3 +62,10 @@ target_link_libraries(hTV PRIVATE
     OpenGL::GL
     Threads::Threads
 )
+
+# Install rules -- used by `cmake --install build` directly, and by the
+# PKGBUILD's package() step for `makepkg -si` on Arch/CachyOS.
+include(GNUInstallDirs)
+
+install(TARGETS hTV RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
+install(FILES linux/hTV.desktop DESTINATION ${CMAKE_INSTALL_DATADIR}/applications)

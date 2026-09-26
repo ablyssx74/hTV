@@ -44,10 +44,18 @@ auto-detect Wayland when running in a Wayland session (e.g. Plasma/KDE on
 Wayland) and fall back to X11 otherwise, as long as Qt's Wayland platform
 plugin package is installed (see below).
 
-### Dependencies (CachyOS / Arch)
+### Install on CachyOS / Arch (recommended)
+
+A `PKGBUILD` is included in the repo root, so you can build and install a
+real package straight from a checkout with:
 ```
 sudo pacman -S --needed base-devel cmake sdl2 mpv ffmpeg curl qt6-base qt6-wayland
+makepkg -si
 ```
+`makepkg -si` builds via the same CMakeLists.txt below, installs `hTV` to
+`/usr/bin`, and drops a `.desktop` entry so it shows up in your application
+menu (Plasma's included). `pacman -R htv` removes it later like any other
+package.
 
 ### Dependencies (Debian/Ubuntu-based)
 ```
@@ -56,10 +64,14 @@ sudo apt install build-essential cmake libsdl2-dev libmpv-dev \
     libcurl4-openssl-dev qt6-base-dev qt6-wayland
 ```
 
-### To build (Linux)
+### To build manually (any Linux)
 ```
 cmake -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build -j
 ./build/hTV <url-or-file>
+```
+Or install it system-wide instead of running it in place:
+```
+sudo cmake --install build
 ```
 

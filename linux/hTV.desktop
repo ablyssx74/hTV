@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=hTV
+GenericName=Media Player
+Comment=SDL2/libmpv media player with an EQ/Reverb/Chorus config window
+Exec=hTV %U
+Icon=multimedia-player
+Terminal=false
+Categories=AudioVideo;Player;
+MimeType=video/mp4;video/x-matroska;video/webm;video/x-msvideo;video/quicktime;audio/mpeg;audio/flac;audio/ogg;audio/x-wav;
