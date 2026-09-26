@@ -257,7 +257,7 @@ int main(int argc, char* argv[]) {
 
     {
         const char* targetUrl = "https://raw.githubusercontent.com/ablyssx74/hTV/refs/heads/main/VERSION";
-        const char* localVersion = "v1.2.0";
+        const char* localVersion = "v1.3.0";
 
         char updateCmd[1024];
         // notify-send is the freedesktop-standard desktop notifier -- on KDE

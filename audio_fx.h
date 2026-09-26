@@ -53,6 +53,14 @@ struct AudioConfig {
     float chorusRate = 30.0f;   // 0..100
     float chorusDepth = 40.0f;  // 0..100
     float chorusMix = 50.0f;    // 0..100
+
+    // Playlist folder + random-play toggle (Haiku only for now -- see
+    // hTV.cpp's Playlist section). Grouped into this same struct and
+    // settings file as the audio FX config above for simplicity, same as
+    // Haiku's own flat BMessage keeps everything in one settings file.
+    // The Linux build currently just carries these unused.
+    std::string playlistFolder;   // empty = none chosen yet
+    bool        randomPlay = false;
 };
 
 // The live, shared audio configuration. Both the SDL/mpv thread and whichever

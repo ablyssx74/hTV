@@ -3,6 +3,7 @@
  * All rights reserved. Distributed under the terms of the MIT license.
  */
  
+#include <curl/curl.h>
 #include <SDL2/SDL.h>
 #include <SDL2/SDL_opengl.h>
 #include <mpv/client.h>
@@ -45,6 +46,24 @@
 #include <Rect.h>
 #include <Point.h>
 #include <Size.h>
+#include <Button.h>
+#include <ListView.h>
+#include <ScrollView.h>
+#include <StringItem.h>
+#include <FilePanel.h>
+#include <Entry.h>
+#include <Messenger.h>
+#include <Notification.h>
+
+// Playlist folder scanning/shuffling -- same std::filesystem-based approach
+// HaikuSuperMusicThingy uses for its own MilkDrop preset list.
+#include <vector>
+#include <string>
+#include <algorithm>
+#include <filesystem>
+#include <random>
+#include <ctime>
+#include <cctype>
 
 // Shared, platform-independent audio config (15-band EQ, limiter, reverb,
 // chorus) -- see audio_fx.h/.cpp. Both this Haiku UI and the Linux/Qt UI in
@@ -96,6 +115,8 @@ static void SaveAudioConfig() {
     settings.AddFloat("chorus_rate", gAudioCfg.chorusRate);
     settings.AddFloat("chorus_depth", gAudioCfg.chorusDepth);
     settings.AddFloat("chorus_mix", gAudioCfg.chorusMix);
+    settings.AddString("playlist_folder", gAudioCfg.playlistFolder.c_str());
+    settings.AddBool("random_play", gAudioCfg.randomPlay);
 
     ssize_t size = settings.FlattenedSize();
     char* buffer = new (std::nothrow) char[size];
@@ -123,6 +144,8 @@ static void LoadAudioConfig() {
     gAudioCfg.chorusRate = 30.0f;
     gAudioCfg.chorusDepth = 40.0f;
     gAudioCfg.chorusMix = 50.0f;
+    gAudioCfg.playlistFolder = "";
+    gAudioCfg.randomPlay = false;
 
     BPath path;
     if (find_directory(B_USER_SETTINGS_DIRECTORY, &path) != B_OK) return;
@@ -154,6 +177,145 @@ static void LoadAudioConfig() {
     if (settings.FindFloat("chorus_rate", &valFloat) == B_OK) gAudioCfg.chorusRate = valFloat;
     if (settings.FindFloat("chorus_depth", &valFloat) == B_OK) gAudioCfg.chorusDepth = valFloat;
     if (settings.FindFloat("chorus_mix", &valFloat) == B_OK) gAudioCfg.chorusMix = valFloat;
+
+    const char* valString;
+    if (settings.FindString("playlist_folder", &valString) == B_OK) gAudioCfg.playlistFolder = valString;
+    if (settings.FindBool("random_play", &valBool) == B_OK) gAudioCfg.randomPlay = valBool;
+}
+
+// =============================================================================
+// PLAYLIST -- folder of local media files, shown as an expandable list
+// (same show/hide-a-BScrollView pattern HaikuSuperMusicThingy uses for its
+// MilkDrop preset list), plus a manual Shuffle/Random Play option mirroring
+// HaikuSuperMusicThingy's own MSG_SHUFFLE: a one-shot random pick, not a
+// continuous auto-advancing playlist (hTV doesn't listen for mpv's
+// end-of-file event, and this deliberately doesn't add that).
+// =============================================================================
+
+// Broad allowlist of extensions mpv commonly plays. libmpv has no API to
+// query its exact supported-format list (it ultimately depends on
+// whichever ffmpeg demuxers/decoders it was built against), so this is a
+// practical list covering the formats that actually show up in a media
+// folder, not an exhaustive one.
+static const char* kPlayableExtensions[] = {
+    // Audio
+    "mp3", "flac", "wav", "wv", "ape", "ogg", "oga", "opus", "m4a", "aac",
+    "wma", "mka", "aiff", "aif", "ac3", "dts", "mid", "midi", "amr", "au",
+    // Video
+    "mp4", "m4v", "mkv", "webm", "avi", "mov", "flv", "wmv", "mpg", "mpeg",
+    "m2ts", "mts", "ts", "3gp", "3g2", "ogv", "vob", "asf", "rm", "rmvb",
+    "divx", "m2v", "mxf", "y4m"
+};
+
+static bool IsPlayableExtension(const std::string& extLower) {
+    for (const char* ext : kPlayableExtensions) {
+        if (extLower == ext) return true;
+    }
+    return false;
+}
+
+// Files currently shown in the playlist BListView, in the same order --
+// index N here is index N there. Kept as full paths (rather than joining
+// the folder path back on at play time) so a later folder change can't
+// accidentally make an old selection resolve to the wrong file.
+static std::vector<std::string> gPlaylistFullPaths;
+
+// (Re)scans folderPath (non-recursive -- a playlist folder, not a nested
+// preset library) for playable files and repopulates list + gPlaylistFullPaths
+// to match, sorted by filename. Logs a one-line summary to stderr either
+// way (run hTV from Terminal to see it) -- the first version of this
+// silently produced an empty list on real hardware with no clue why, so
+// this diagnostic stays rather than getting stripped out once it's
+// confirmed working, the same reasoning hrecord's own diagnostics use.
+static void PopulatePlaylistList(BListView* list, const std::string& folderPath) {
+    list->MakeEmpty();
+    gPlaylistFullPaths.clear();
+    if (folderPath.empty()) return;
+
+    std::error_code ec;
+    if (!std::filesystem::exists(folderPath, ec) || ec) {
+        fprintf(stderr, "[hTV] Playlist folder \"%s\" doesn't exist or isn't reachable "
+            "(error: %s)\n", folderPath.c_str(), ec.message().c_str());
+        return;
+    }
+
+    int totalEntries = 0, statErrors = 0, notRegularFiles = 0, wrongExtension = 0;
+    std::vector<std::filesystem::directory_entry> entries;
+    // A permission error or a symlink dangling mid-scan throws
+    // filesystem_error even with the error_code-taking constructor, since
+    // range-based for always calls the throwing operator++() -- catch it
+    // so one bad entry doesn't lose whatever was already found.
+    try {
+        for (const auto& entry : std::filesystem::directory_iterator(folderPath, ec)) {
+            if (ec) {
+                fprintf(stderr, "[hTV] Playlist scan of \"%s\" stopped early: %s\n",
+                    folderPath.c_str(), ec.message().c_str());
+                break;
+            }
+            totalEntries++;
+
+            // Per-entry error_code overload -- unlike the throwing
+            // is_regular_file(), a single broken symlink or a stat
+            // failure here only skips that one entry instead of aborting
+            // the whole scan via the catch below.
+            std::error_code statEc;
+            bool isRegular = entry.is_regular_file(statEc);
+            if (statEc) {
+                statErrors++;
+                continue;
+            }
+            if (!isRegular) {
+                notRegularFiles++;
+                continue;
+            }
+
+            std::string ext = entry.path().extension().string();
+            if (!ext.empty() && ext[0] == '.') ext.erase(0, 1);
+            std::transform(ext.begin(), ext.end(), ext.begin(),
+                            [](unsigned char c) { return std::tolower(c); });
+            if (IsPlayableExtension(ext)) {
+                entries.push_back(entry);
+            } else {
+                wrongExtension++;
+            }
+        }
+    } catch (const std::filesystem::filesystem_error& e) {
+        fprintf(stderr, "[hTV] Playlist scan of \"%s\" threw: %s\n",
+            folderPath.c_str(), e.what());
+    }
+
+    fprintf(stderr, "[hTV] Playlist folder \"%s\": %d entries seen, %d matched a playable "
+        "extension, %d had a different extension, %d weren't regular files, %d couldn't be "
+        "stat'd.\n", folderPath.c_str(), totalEntries, (int)entries.size(), wrongExtension,
+        notRegularFiles, statErrors);
+
+    std::sort(entries.begin(), entries.end(), [](const auto& a, const auto& b) {
+        return a.path().filename().string() < b.path().filename().string();
+    });
+
+    for (const auto& entry : entries) {
+        list->AddItem(new BStringItem(entry.path().filename().string().c_str()));
+        gPlaylistFullPaths.push_back(entry.path().string());
+    }
+}
+
+// Loads a specific playlist entry by its BListView index.
+static void PlayPlaylistFileAt(int32 index) {
+    if (index < 0 || index >= (int32)gPlaylistFullPaths.size() || g_mpv == nullptr) return;
+    const char* loadCmd[] = {"loadfile", gPlaylistFullPaths[index].c_str(), nullptr};
+    mpv_command(g_mpv, loadCmd);
+}
+
+// Picks and plays one random file from the current playlist -- the same
+// one-shot random-pick HaikuSuperMusicThingy's own Shuffle does, not a
+// continuous auto-advance.
+static void PlayRandomPlaylistFile() {
+    if (gPlaylistFullPaths.empty() || g_mpv == nullptr) return;
+    static std::mt19937 rng(static_cast<unsigned int>(std::time(nullptr)));
+    std::uniform_int_distribution<size_t> dist(0, gPlaylistFullPaths.size() - 1);
+    size_t index = dist(rng);
+    const char* loadCmd[] = {"loadfile", gPlaylistFullPaths[index].c_str(), nullptr};
+    mpv_command(g_mpv, loadCmd);
 }
 
 // A BSlider that also responds to the mouse wheel -- same small helper
@@ -197,12 +359,20 @@ enum {
     MSG_CFG_REVERB_TYPE    = 'cfry',
     MSG_CFG_REVERB_SLIDER  = 'cfrs',
     MSG_CFG_CHORUS_TOGGLE  = 'cfch',
-    MSG_CFG_CHORUS_SLIDER  = 'cfcs'
+    MSG_CFG_CHORUS_SLIDER  = 'cfcs',
+
+    MSG_CFG_PLAYLIST_TOGGLE        = 'cfpt',
+    MSG_CFG_PLAYLIST_FOLDER        = 'cfpb',
+    MSG_CFG_PLAYLIST_DIR_CHOSEN    = 'cfpc',
+    MSG_CFG_PLAYLIST_SELECTED      = 'cfpl',
+    MSG_CFG_PLAYLIST_RANDOM_TOGGLE = 'cfpr',
+    MSG_CFG_PLAYLIST_SHUFFLE       = 'cfpz'
 };
 
 class ConfigWindow : public BWindow {
 public:
     ConfigWindow();
+    virtual ~ConfigWindow();
     virtual void MessageReceived(BMessage* message);
     virtual bool QuitRequested();
 
@@ -222,11 +392,21 @@ private:
     BSlider*    fRoomSizeSlider;
     BSlider*    fDampingSlider;
     BSlider*    fWetSlider;
+    BGroupView* fReverbControlsGroup;
 
     BCheckBox*  fChorusToggle;
     BSlider*    fChorusRateSlider;
     BSlider*    fChorusDepthSlider;
     BSlider*    fChorusMixSlider;
+    BGroupView* fChorusControlsGroup;
+
+    BButton*     fPlaylistFolderButton;
+    BFilePanel*  fPlaylistFolderPanel;
+    BCheckBox*   fPlaylistToggle;
+    BListView*   fPlaylistList;
+    BScrollView* fPlaylistScroll;
+    BCheckBox*   fRandomPlayToggle;
+    BButton*     fShuffleButton;
 };
 
 // Global handle to the (single) open Config window, so a second right-click
@@ -279,6 +459,38 @@ ConfigWindow::ConfigWindow()
     fPresetField = new BMenuField("preset_field", "Preset:", presetMenu);
     background->AddChild(fPresetField);
 
+    // ---- Limiter (paired with the EQ, same as HaikuSuperMusicThingy: a
+    // narrow vertical column of short horizontal sliders sitting to the
+    // right of the EQ bands inside the same horizontal row, instead of
+    // three full-width rows below it -- and labeled "In"/"Lmt"/"Rel", the
+    // same abbreviations HaikuSuperMusicThingy uses for this exact
+    // control) ----
+    BGroupView* limitGroup = new BGroupView(B_VERTICAL, 5);
+    BStringView* limiterTitle = new BStringView(NULL, "Limiter");
+    limiterTitle->SetFont(be_bold_font);
+    limitGroup->AddChild(limiterTitle);
+
+    BMessage* limitInMsg = new BMessage(MSG_CFG_LIMITER_SLIDER);
+    limitInMsg->AddInt32("param", 0);
+    fLimitInputSlider = new WheelSlider("limit_in", "In", limitInMsg, -20, 20, B_HORIZONTAL, 1);
+    fLimitInputSlider->SetValue((int32)gAudioCfg.limitInput);
+    fLimitInputSlider->SetExplicitMinSize(BSize(90, B_SIZE_UNSET));
+    limitGroup->AddChild(fLimitInputSlider);
+
+    BMessage* limitThreshMsg = new BMessage(MSG_CFG_LIMITER_SLIDER);
+    limitThreshMsg->AddInt32("param", 1);
+    fLimitThresholdSlider = new WheelSlider("limit_thr", "Lmt", limitThreshMsg, -20, 0, B_HORIZONTAL, 1);
+    fLimitThresholdSlider->SetValue((int32)gAudioCfg.limitThreshold);
+    fLimitThresholdSlider->SetExplicitMinSize(BSize(90, B_SIZE_UNSET));
+    limitGroup->AddChild(fLimitThresholdSlider);
+
+    BMessage* limitRelMsg = new BMessage(MSG_CFG_LIMITER_SLIDER);
+    limitRelMsg->AddInt32("param", 2);
+    fLimitReleaseSlider = new WheelSlider("limit_rel", "Rel", limitRelMsg, 10, 1000, B_HORIZONTAL, 5);
+    fLimitReleaseSlider->SetValue((int32)gAudioCfg.limitRelease);
+    fLimitReleaseSlider->SetExplicitMinSize(BSize(90, B_SIZE_UNSET));
+    limitGroup->AddChild(fLimitReleaseSlider);
+
     BGroupView* sliderRow = new BGroupView(B_HORIZONTAL, 4);
     for (int i = 0; i < 15; i++) {
         BGroupView* bandGroup = new BGroupView(B_VERTICAL, 2);
@@ -302,32 +514,15 @@ ConfigWindow::ConfigWindow()
         bandGroup->AddChild(lbl);
         sliderRow->AddChild(bandGroup);
     }
+    sliderRow->AddChild(limitGroup);
     background->AddChild(sliderRow);
 
-    // ---- Limiter (paired with the EQ, same as HaikuSuperMusicThingy) ----
-    BStringView* limiterTitle = new BStringView(NULL, "Limiter");
-    limiterTitle->SetFont(be_bold_font);
-    background->AddChild(limiterTitle);
-
-    BMessage* limitInMsg = new BMessage(MSG_CFG_LIMITER_SLIDER);
-    limitInMsg->AddInt32("param", 0);
-    fLimitInputSlider = new WheelSlider("limit_in", "In", limitInMsg, -20, 20, B_HORIZONTAL, 1);
-    fLimitInputSlider->SetValue((int32)gAudioCfg.limitInput);
-    background->AddChild(fLimitInputSlider);
-
-    BMessage* limitThreshMsg = new BMessage(MSG_CFG_LIMITER_SLIDER);
-    limitThreshMsg->AddInt32("param", 1);
-    fLimitThresholdSlider = new WheelSlider("limit_thr", "Threshold", limitThreshMsg, -20, 0, B_HORIZONTAL, 1);
-    fLimitThresholdSlider->SetValue((int32)gAudioCfg.limitThreshold);
-    background->AddChild(fLimitThresholdSlider);
-
-    BMessage* limitRelMsg = new BMessage(MSG_CFG_LIMITER_SLIDER);
-    limitRelMsg->AddInt32("param", 2);
-    fLimitReleaseSlider = new WheelSlider("limit_rel", "Release", limitRelMsg, 10, 1000, B_HORIZONTAL, 5);
-    fLimitReleaseSlider->SetValue((int32)gAudioCfg.limitRelease);
-    background->AddChild(fLimitReleaseSlider);
-
     // ---- Reverb & FX ----
+    // Room Size/Damping/Wet (and the Type field) only matter once Reverb
+    // is actually on, so they're wrapped in one group and hidden until
+    // then -- same show/hide-on-checkbox idea as the Playlist file list
+    // below, applied here to keep the window from always reserving space
+    // for controls that don't do anything yet.
     BStringView* fxTitle = new BStringView(NULL, "Reverb & Effects");
     fxTitle->SetFont(be_bold_font);
     background->AddChild(fxTitle);
@@ -335,6 +530,8 @@ ConfigWindow::ConfigWindow()
     fReverbToggle = new BCheckBox("reverb_toggle", "Enable Reverb", new BMessage(MSG_CFG_REVERB_TOGGLE));
     fReverbToggle->SetValue(gAudioCfg.reverbEnabled ? B_CONTROL_ON : B_CONTROL_OFF);
     background->AddChild(fReverbToggle);
+
+    fReverbControlsGroup = new BGroupView(B_VERTICAL, 6);
 
     BPopUpMenu* reverbTypeMenu = new BPopUpMenu("Type");
     const char* reverbTypeNames[] = { "Room", "Hall", "Plate", "Canyon" };
@@ -345,49 +542,117 @@ ConfigWindow::ConfigWindow()
     }
     reverbTypeMenu->ItemAt(gAudioCfg.reverbType % 4)->SetMarked(true);
     fReverbTypeField = new BMenuField("reverb_type_field", "Type:", reverbTypeMenu);
-    background->AddChild(fReverbTypeField);
+    fReverbControlsGroup->AddChild(fReverbTypeField);
 
     BMessage* roomMsg = new BMessage(MSG_CFG_REVERB_SLIDER);
     roomMsg->AddInt32("param", 0);
     fRoomSizeSlider = new WheelSlider("reverb_room", "Room Size", roomMsg, 0, 100, B_HORIZONTAL, 1);
     fRoomSizeSlider->SetValue((int32)gAudioCfg.reverbRoomSize);
-    background->AddChild(fRoomSizeSlider);
+    fReverbControlsGroup->AddChild(fRoomSizeSlider);
 
     BMessage* dampMsg = new BMessage(MSG_CFG_REVERB_SLIDER);
     dampMsg->AddInt32("param", 1);
     fDampingSlider = new WheelSlider("reverb_damp", "Damping", dampMsg, 0, 100, B_HORIZONTAL, 1);
     fDampingSlider->SetValue((int32)gAudioCfg.reverbDamping);
-    background->AddChild(fDampingSlider);
+    fReverbControlsGroup->AddChild(fDampingSlider);
 
     BMessage* wetMsg = new BMessage(MSG_CFG_REVERB_SLIDER);
     wetMsg->AddInt32("param", 2);
     fWetSlider = new WheelSlider("reverb_wet", "Wet Level", wetMsg, 0, 100, B_HORIZONTAL, 1);
     fWetSlider->SetValue((int32)gAudioCfg.reverbWet);
-    background->AddChild(fWetSlider);
+    fReverbControlsGroup->AddChild(fWetSlider);
+
+    background->AddChild(fReverbControlsGroup);
+    if (!gAudioCfg.reverbEnabled) fReverbControlsGroup->Hide();
 
     fChorusToggle = new BCheckBox("chorus_toggle", "Enable Chorus", new BMessage(MSG_CFG_CHORUS_TOGGLE));
     fChorusToggle->SetValue(gAudioCfg.chorusEnabled ? B_CONTROL_ON : B_CONTROL_OFF);
     background->AddChild(fChorusToggle);
 
     // Chorus gets the same dynamic Rate/Depth/Mix sliders Reverb has,
-    // instead of being a fixed-parameter on/off toggle.
+    // instead of being a fixed-parameter on/off toggle -- same hide-
+    // unless-enabled treatment.
+    fChorusControlsGroup = new BGroupView(B_VERTICAL, 6);
+
     BMessage* chorusRateMsg = new BMessage(MSG_CFG_CHORUS_SLIDER);
     chorusRateMsg->AddInt32("param", 0);
     fChorusRateSlider = new WheelSlider("chorus_rate", "Rate", chorusRateMsg, 0, 100, B_HORIZONTAL, 1);
     fChorusRateSlider->SetValue((int32)gAudioCfg.chorusRate);
-    background->AddChild(fChorusRateSlider);
+    fChorusControlsGroup->AddChild(fChorusRateSlider);
 
     BMessage* chorusDepthMsg = new BMessage(MSG_CFG_CHORUS_SLIDER);
     chorusDepthMsg->AddInt32("param", 1);
     fChorusDepthSlider = new WheelSlider("chorus_depth", "Depth", chorusDepthMsg, 0, 100, B_HORIZONTAL, 1);
     fChorusDepthSlider->SetValue((int32)gAudioCfg.chorusDepth);
-    background->AddChild(fChorusDepthSlider);
+    fChorusControlsGroup->AddChild(fChorusDepthSlider);
 
     BMessage* chorusMixMsg = new BMessage(MSG_CFG_CHORUS_SLIDER);
     chorusMixMsg->AddInt32("param", 2);
     fChorusMixSlider = new WheelSlider("chorus_mix", "Mix", chorusMixMsg, 0, 100, B_HORIZONTAL, 1);
     fChorusMixSlider->SetValue((int32)gAudioCfg.chorusMix);
-    background->AddChild(fChorusMixSlider);
+    fChorusControlsGroup->AddChild(fChorusMixSlider);
+
+    background->AddChild(fChorusControlsGroup);
+    if (!gAudioCfg.chorusEnabled) fChorusControlsGroup->Hide();
+
+    // ---- Playlist ----
+    // Folder button + label mirrors HaikuDVR's "Save Recordings To Folder"
+    // button (labels itself to the currently-selected folder); the
+    // expandable file list + play-on-select mirrors HaikuSuperMusicThingy's
+    // MilkDrop preset list (a checkbox shows/hides a BScrollView-wrapped
+    // BListView, and selecting an entry plays it).
+    BStringView* playlistTitle = new BStringView(NULL, "Playlist");
+    playlistTitle->SetFont(be_bold_font);
+    background->AddChild(playlistTitle);
+
+    BString folderButtonLabel("Playlist Folder: ");
+    folderButtonLabel << (gAudioCfg.playlistFolder.empty()
+        ? "(none selected)" : gAudioCfg.playlistFolder.c_str());
+    fPlaylistFolderButton = new BButton("playlist_folder_btn", folderButtonLabel.String(),
+        new BMessage(MSG_CFG_PLAYLIST_FOLDER));
+    background->AddChild(fPlaylistFolderButton);
+
+    fPlaylistFolderPanel = new BFilePanel(B_OPEN_PANEL, new BMessenger(this), NULL,
+        B_DIRECTORY_NODE, false, new BMessage(MSG_CFG_PLAYLIST_DIR_CHOSEN));
+
+    BGroupView* playlistToggleRow = new BGroupView(B_HORIZONTAL, 6);
+    fPlaylistToggle = new BCheckBox("playlist_toggle", "Show Playable Files",
+        new BMessage(MSG_CFG_PLAYLIST_TOGGLE));
+    fRandomPlayToggle = new BCheckBox("random_play_toggle", "Random Play",
+        new BMessage(MSG_CFG_PLAYLIST_RANDOM_TOGGLE));
+    fRandomPlayToggle->SetValue(gAudioCfg.randomPlay ? B_CONTROL_ON : B_CONTROL_OFF);
+    fShuffleButton = new BButton("shuffle_btn", "Shuffle", new BMessage(MSG_CFG_PLAYLIST_SHUFFLE));
+    playlistToggleRow->AddChild(fPlaylistToggle);
+    playlistToggleRow->AddChild(fRandomPlayToggle);
+    playlistToggleRow->AddChild(fShuffleButton);
+    background->AddChild(playlistToggleRow);
+
+    fPlaylistList = new BListView("playlist_list");
+    fPlaylistList->SetSelectionMessage(new BMessage(MSG_CFG_PLAYLIST_SELECTED));
+    // Explicit, list-appropriate colors and font rather than relying on
+    // whatever a freshly-constructed BListView inherits by default --
+    // cheap insurance against a rendering (not data) bug, ruling that
+    // class of cause out explicitly instead of assuming defaults are fine.
+    fPlaylistList->SetViewColor(ui_color(B_LIST_BACKGROUND_COLOR));
+    fPlaylistList->SetLowColor(ui_color(B_LIST_BACKGROUND_COLOR));
+    fPlaylistList->SetHighColor(ui_color(B_LIST_ITEM_TEXT_COLOR));
+    fPlaylistList->SetFont(be_plain_font);
+    fPlaylistScroll = new BScrollView("playlist_scroll", fPlaylistList,
+        0 /* resizingMode */, 0 /* flags */, false /* horizontal */, true /* vertical */,
+        B_FANCY_BORDER);
+    // Collapsed by default (same as HaikuSuperMusicThingy's preset list) --
+    // keeps the window compact until the user actually wants to browse
+    // files, rather than always reserving vertical space for it. Width is
+    // now explicitly constrained too (previously B_SIZE_UNSET), in case an
+    // empty BListView's own near-zero PreferredSize() was collapsing this
+    // row to an unreadable sliver before any items ever got a chance to
+    // establish a real width.
+    fPlaylistScroll->Hide();
+    fPlaylistScroll->SetExplicitMinSize(BSize(240, 120));
+    fPlaylistScroll->SetExplicitMaxSize(BSize(B_SIZE_UNSET, 220));
+    background->AddChild(fPlaylistScroll);
+
+    PopulatePlaylistList(fPlaylistList, gAudioCfg.playlistFolder);
 
     // Route every control's message to this window.
     fEQToggle->SetTarget(this);
@@ -405,6 +670,10 @@ ConfigWindow::ConfigWindow()
     fChorusRateSlider->SetTarget(this);
     fChorusDepthSlider->SetTarget(this);
     fChorusMixSlider->SetTarget(this);
+    fPlaylistFolderButton->SetTarget(this);
+    fPlaylistToggle->SetTarget(this);
+    fRandomPlayToggle->SetTarget(this);
+    fShuffleButton->SetTarget(this);
 
     // Grow the window to fit everything (15 vertical EQ sliders plus the
     // reverb/chorus rows need more room than a fixed guess reliably gives),
@@ -412,6 +681,13 @@ ConfigWindow::ConfigWindow()
     BSize preferred = background->PreferredSize();
     ResizeTo(preferred.Width(), preferred.Height());
     CenterOnScreen();
+}
+
+// BFilePanel isn't a BView the window's own child hierarchy owns/deletes
+// automatically (same reason HaikuDVR's own folder-panel window explicitly
+// deletes its BFilePanel in its destructor), so it needs cleaning up here.
+ConfigWindow::~ConfigWindow() {
+    delete fPlaylistFolderPanel;
 }
 
 void ConfigWindow::_ApplyPreset(const float* values) {
@@ -471,6 +747,13 @@ void ConfigWindow::MessageReceived(BMessage* message) {
         }
         case MSG_CFG_REVERB_TOGGLE: {
             gAudioCfg.reverbEnabled = (fReverbToggle->Value() == B_CONTROL_ON);
+            if (gAudioCfg.reverbEnabled) {
+                fReverbControlsGroup->Show();
+            } else {
+                fReverbControlsGroup->Hide();
+            }
+            InvalidateLayout(true);
+            ResizeToPreferred();
             ApplyAudioFilters(g_mpv);
             SaveAudioConfig();
             break;
@@ -499,6 +782,13 @@ void ConfigWindow::MessageReceived(BMessage* message) {
         }
         case MSG_CFG_CHORUS_TOGGLE: {
             gAudioCfg.chorusEnabled = (fChorusToggle->Value() == B_CONTROL_ON);
+            if (gAudioCfg.chorusEnabled) {
+                fChorusControlsGroup->Show();
+            } else {
+                fChorusControlsGroup->Hide();
+            }
+            InvalidateLayout(true);
+            ResizeToPreferred();
             ApplyAudioFilters(g_mpv);
             SaveAudioConfig();
             break;
@@ -514,6 +804,79 @@ void ConfigWindow::MessageReceived(BMessage* message) {
             }
             ApplyAudioFilters(g_mpv);
             SaveAudioConfig();
+            break;
+        }
+        case MSG_CFG_PLAYLIST_FOLDER: {
+            if (fPlaylistFolderPanel) fPlaylistFolderPanel->Show();
+            break;
+        }
+        case MSG_CFG_PLAYLIST_DIR_CHOSEN: {
+            entry_ref ref;
+            if (message->FindRef("refs", &ref) == B_OK) {
+                BEntry entry(&ref, true);
+                BPath path;
+                if (entry.GetPath(&path) == B_OK) {
+                    gAudioCfg.playlistFolder = path.Path();
+                    BString newLabel("Playlist Folder: ");
+                    newLabel << gAudioCfg.playlistFolder.c_str();
+                    fPlaylistFolderButton->SetLabel(newLabel.String());
+                    PopulatePlaylistList(fPlaylistList, gAudioCfg.playlistFolder);
+                    SaveAudioConfig();
+                }
+            }
+            break;
+        }
+        case MSG_CFG_PLAYLIST_TOGGLE: {
+            bool show = (fPlaylistToggle->Value() == B_CONTROL_ON);
+            if (show) {
+                PopulatePlaylistList(fPlaylistList, gAudioCfg.playlistFolder);
+                fPlaylistList->Invalidate();
+                fPlaylistScroll->Show();
+            } else {
+                fPlaylistScroll->Hide();
+            }
+            InvalidateLayout(true);
+            ResizeToPreferred();
+
+            if (show) {
+                // Confirmed on real hardware: BScrollView resolves its
+                // own size through the layout system fine, but doesn't
+                // propagate that down to a target that was never given
+                // an explicit frame before being wrapped -- fPlaylistList
+                // was rendering at Haiku's canonical invalid/zero-size
+                // rect (right < left) despite genuinely holding items.
+                // Force the sync directly rather than rely on whatever
+                // internal mechanism isn't firing for this target.
+                BRect scrollBounds = fPlaylistScroll->Bounds();
+                if (scrollBounds.IsValid()) {
+                    fPlaylistList->ResizeTo(scrollBounds.Width(), scrollBounds.Height());
+                }
+                fPlaylistList->Invalidate();
+            }
+            break;
+        }
+        case MSG_CFG_PLAYLIST_SELECTED: {
+            int32 index = fPlaylistList->CurrentSelection();
+            if (index >= 0) {
+                // Random Play changes what a click does: instead of
+                // playing the file actually clicked, it plays a random
+                // one from the list. Manual, one-shot -- no auto-advance
+                // when a track ends (see the top of this section).
+                if (gAudioCfg.randomPlay) {
+                    PlayRandomPlaylistFile();
+                } else {
+                    PlayPlaylistFileAt(index);
+                }
+            }
+            break;
+        }
+        case MSG_CFG_PLAYLIST_RANDOM_TOGGLE: {
+            gAudioCfg.randomPlay = (fRandomPlayToggle->Value() == B_CONTROL_ON);
+            SaveAudioConfig();
+            break;
+        }
+        case MSG_CFG_PLAYLIST_SHUFFLE: {
+            PlayRandomPlaylistFile();
             break;
         }
         default:
@@ -631,7 +994,59 @@ void UpdatePlayerWindowTitle(PlayerCtx* ctx) {
     if (pathStr) mpv_free(pathStr);
 }
 
+// =========================================================================
+// NATIVE ASYNCHRONOUS UPDATE ENGINE (libcurl)
+// =========================================================================
+static size_t UpdateCheckWriteCallback(void* contents, size_t size, size_t nmemb, void* userp) {
+    ((std::string*)userp)->append((char*)contents, size * nmemb);
+    return size * nmemb;
+}
+
+static int32 BackgroundUpdateChecker(void* data) {
+    const char* targetUrl = "https://raw.githubusercontent.com/ablyssx74/hTV/refs/heads/main/VERSION";
+    const char* localVersion = "v1.3.0";
+
+    std::string buffer;
+    CURL* curl = curl_easy_init();
+    if (curl == nullptr) {
+        return B_ERROR;
+    }
+
+    curl_easy_setopt(curl, CURLOPT_URL, targetUrl);
+    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, UpdateCheckWriteCallback);
+    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &buffer);
+    curl_easy_setopt(curl, CURLOPT_USERAGENT, "hTV/1.0");
+    curl_easy_setopt(curl, CURLOPT_TIMEOUT, 10L);
+    curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
+
+    curl_easy_perform(curl);
+    curl_easy_cleanup(curl);
+
+    BString remoteVersionStr = buffer.c_str();
+    remoteVersionStr.Trim();
+
+    if (remoteVersionStr.Length() > 0 && remoteVersionStr != localVersion) {
+        BNotification updateAlert(B_INFORMATION_NOTIFICATION);
+        updateAlert.SetGroup("hTV");
+        updateAlert.SetTitle("Update Available");
+
+        BString alertContent;
+        alertContent << "A newer version of hTV is available! (" << remoteVersionStr << ")";
+        updateAlert.SetContent(alertContent.String());
+
+        updateAlert.Send();
+    }
+
+    return B_OK;
+}
+
 int main(int argc, char* argv[]) {
+    // libcurl's global init is NOT thread-safe against other concurrently running
+    // threads in the process. Doing it once here, from the main thread, before any
+    // background thread ever calls curl_easy_init(), avoids the implicit lazy
+    // global init racing with the app's other background threads later.
+    curl_global_init(CURL_GLOBAL_DEFAULT);
+
     setenv("BE_APP_SIGNATURE", "application/x-vnd.hTV", 1);
 
     const char* streamUrl = "";
@@ -806,18 +1221,10 @@ int main(int argc, char* argv[]) {
     bool needsRender = false; 
 
 	{
-	    const char* targetUrl = "https://raw.githubusercontent.com/ablyssx74/hTV/refs/heads/main/VERSION";
-	    const char* localVersion = "v1.2.0";
-	
-	    char updateCmd[1024];
-	    snprintf(updateCmd, sizeof(updateCmd),
-	        "(REMOTE_V=$(curl -sL \"%s\" | tr -d '\\r\\n'); "
-	        "if [ ! -z \"$REMOTE_V\" ] && [ \"$REMOTE_V\" != \"%s\" ]; then "
-	        "notify --title \"Update Available\" --group \"hTV\" "
-	        "\"A newer version of hTV is available! ($REMOTE_V)\"; fi) &",
-	        targetUrl, localVersion);
-	    int updateCmdResult = system(updateCmd);
-	    (void)updateCmdResult;
+	    thread_id updateThread = spawn_thread(BackgroundUpdateChecker, "htv_update_checker", B_LOW_PRIORITY, nullptr);
+	    if (updateThread >= B_OK) {
+	        resume_thread(updateThread);
+	    }
 	}
 
     while (ctx.isRunning) {
@@ -1013,6 +1420,7 @@ int main(int argc, char* argv[]) {
     mpv_destroy(ctx.mpv);
     SDL_DestroyWindow(ctx.window);
     SDL_Quit();
+    curl_global_cleanup();
 
     return 0;
 }
