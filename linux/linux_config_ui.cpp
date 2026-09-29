@@ -7,6 +7,13 @@
 #include "audio_fx.h"
 
 #include <QApplication>
+#include <QDBusConnection>
+#include <QDBusMessage>
+#include <QDBusPendingCallWatcher>
+#include <QDesktopServices>
+#include <QMessageBox>
+#include <QPushButton>
+#include <QUrl>
 #include <QWidget>
 #include <QVBoxLayout>
 #include <QHBoxLayout>
@@ -426,6 +433,55 @@ void ShowLinuxContextMenu() {
     }
     fprintf(stderr, "[hTV] Right-click received, opening Config window\n");
     ShowLinuxConfigWindow();
+}
+
+void NotifyLinuxUpdateAvailable(const std::string& remoteVersion, const std::string& localVersion) {
+    if (!gQtContext) return;
+    const QString remote = QString::fromStdString(remoteVersion);
+    const QString local = QString::fromStdString(localVersion);
+    QMetaObject::invokeMethod(gQtContext, [remote, local]() {
+        const QString title = "hTV Update Available";
+        const QString text = QString("A newer version of hTV is available! (%1)").arg(remote);
+
+        // Nobody may own org.freedesktop.Notifications, and then the call
+        // fails (a fire-and-forget notify-send just loses the message), so
+        // watch the reply and fall back to a dialog of our own.
+        auto showDialog = [title, text, local]() {
+            QMessageBox box(QMessageBox::Information, title,
+                text + "\n\nYou are running " + local + ".", QMessageBox::NoButton);
+            box.addButton("Later", QMessageBox::RejectRole);
+            QPushButton* open = box.addButton("Open GitHub", QMessageBox::AcceptRole);
+            box.setDefaultButton(open);
+            box.exec();
+            if (box.clickedButton() == open)
+                QDesktopServices::openUrl(QUrl("https://github.com/ablyssx74/hTV"));
+        };
+
+        QDBusConnection bus = QDBusConnection::sessionBus();
+        if (!bus.isConnected()) {
+            fprintf(stderr, "[hTV] No D-Bus session bus; showing the update alert\n");
+            showDialog();
+            return;
+        }
+        QDBusMessage msg = QDBusMessage::createMethodCall("org.freedesktop.Notifications",
+            "/org/freedesktop/Notifications", "org.freedesktop.Notifications", "Notify");
+        QVariantMap hints;
+        hints["desktop-entry"] = QString("hTV");
+        msg << QString("hTV") << uint(0) << QString("system-software-update") << title << text
+            << QStringList() << hints << int(-1);
+        auto* watcher = new QDBusPendingCallWatcher(bus.asyncCall(msg, 5000));
+        QObject::connect(watcher, &QDBusPendingCallWatcher::finished, watcher,
+            [showDialog](QDBusPendingCallWatcher* w) {
+                w->deleteLater();
+                if (!w->isError()) {
+                    fprintf(stderr, "[hTV] Update notification shown\n");
+                    return;
+                }
+                fprintf(stderr, "[hTV] Update notification not shown (%s); showing an alert\n",
+                    qPrintable(w->error().message()));
+                showDialog();
+            });
+    }, Qt::QueuedConnection);
 }
 
 void StopLinuxAudioUI() {
