@@ -32,7 +32,7 @@ pkg_check_modules(SWSCALE REQUIRED IMPORTED_TARGET libswscale)
 pkg_check_modules(SWRESAMPLE REQUIRED IMPORTED_TARGET libswresample)
 pkg_check_modules(CURL REQUIRED IMPORTED_TARGET libcurl)
 
-find_package(Qt6 REQUIRED COMPONENTS Widgets)
+find_package(Qt6 REQUIRED COMPONENTS Widgets DBus)
 find_package(OpenGL REQUIRED)
 find_package(Threads REQUIRED)
 
@@ -59,6 +59,7 @@ target_link_libraries(hTV PRIVATE
     PkgConfig::SWRESAMPLE
     PkgConfig::CURL
     Qt6::Widgets
+    Qt6::DBus
     OpenGL::GL
     Threads::Threads
 )

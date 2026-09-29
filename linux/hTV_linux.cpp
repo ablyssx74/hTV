@@ -21,6 +21,9 @@
 #include <stdlib.h>
 #include <string.h>
 #include <clocale>
+#include <curl/curl.h>
+#include <string>
+#include <thread>
 
 #include "audio_fx.h"
 #include "linux_config_ui.h"
@@ -38,6 +41,57 @@ struct PlayerCtx {
     char currentTitle[512];
     int texWidth, texHeight;
 };
+
+static const char* const kLocalVersion = "v1.3.0";
+
+static size_t CurlAppend(void* data, size_t size, size_t count, void* out) {
+    static_cast<std::string*>(out)->append(static_cast<const char*>(data), size * count);
+    return size * count;
+}
+
+// "v1.3.0" -> 10300, so versions compare numerically (0 if unparsable).
+static int FlattenVersion(const char* s) {
+    int a = 0, b = 0, c = 0;
+    while (*s && (*s < '0' || *s > '9')) s++;
+    if (sscanf(s, "%d.%d.%d", &a, &b, &c) < 2) return 0;
+    return a * 10000 + b * 100 + c;
+}
+
+// Fetches VERSION from GitHub in the background and, if it's newer than this
+// build, hands off to the Qt thread to notify the user (desktop notification,
+// or hTV's own alert when no notification server answers).
+static void StartUpdateChecker() {
+    // Initialise libcurl here on the main thread; its lazy init inside
+    // curl_easy_init() isn't thread-safe.
+    curl_global_init(CURL_GLOBAL_DEFAULT);
+    std::thread([]() {
+        std::string remote;
+        CURL* curl = curl_easy_init();
+        if (!curl) return;
+        curl_easy_setopt(curl, CURLOPT_URL, "https://raw.githubusercontent.com/ablyssx74/hTV/refs/heads/main/VERSION");
+        curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, CurlAppend);
+        curl_easy_setopt(curl, CURLOPT_WRITEDATA, &remote);
+        curl_easy_setopt(curl, CURLOPT_USERAGENT, "hTV-Update-Checker/1.0");
+        curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
+        curl_easy_setopt(curl, CURLOPT_TIMEOUT, 10L);
+        curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1L);
+        CURLcode res = curl_easy_perform(curl);
+        long status = 0;
+        curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &status);
+        curl_easy_cleanup(curl);
+        while (!remote.empty() && (remote.back() == '\n' || remote.back() == '\r' || remote.back() == ' '))
+            remote.pop_back();
+        if (res != CURLE_OK || status != 200 || remote.empty()) {
+            fprintf(stderr, "[hTV] Update check failed\n");
+            return;
+        }
+        if (FlattenVersion(remote.c_str()) > FlattenVersion(kLocalVersion)) {
+            NotifyLinuxUpdateAvailable(remote, kLocalVersion);
+        } else {
+            fprintf(stderr, "[hTV] Update check: up to date\n");
+        }
+    }).detach();
+}
 
 // Wake up the main loop on a new video frame arrival
 void on_mpv_render_update(void* ctx) {
@@ -264,22 +318,7 @@ int main(int argc, char* argv[]) {
     uint32_t lastTitleUpdate = 0;
     bool needsRender = false;
 
-    {
-        const char* targetUrl = "https://raw.githubusercontent.com/ablyssx74/hTV/refs/heads/main/VERSION";
-        const char* localVersion = "v1.3.0";
-
-        char updateCmd[1024];
-        // notify-send is the freedesktop-standard desktop notifier -- on KDE
-        // it's routed through KNotify, no extra setup needed.
-        snprintf(updateCmd, sizeof(updateCmd),
-            "(REMOTE_V=$(curl -sL \"%s\" | tr -d '\\r\\n'); "
-            "if [ ! -z \"$REMOTE_V\" ] && [ \"$REMOTE_V\" != \"%s\" ]; then "
-            "notify-send \"hTV Update Available\" "
-            "\"A newer version of hTV is available! ($REMOTE_V)\"; fi) &",
-            targetUrl, localVersion);
-        int updateCmdResult = system(updateCmd);
-        (void)updateCmdResult;
-    }
+    StartUpdateChecker();
 
     while (ctx.isRunning) {
         if (SDL_WaitEvent(&event)) {

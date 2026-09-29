@@ -4,6 +4,8 @@
  */
 #pragma once
 
+#include <string>
+
 // Linux/Qt front-end for the Audio Configuration window, opened via a
 // right-click (Qt widgets, chosen to match a KDE/Plasma desktop's own
 // theme). Qt runs on its own dedicated thread with its own QApplication and
@@ -34,6 +36,13 @@ void ShowLinuxConfigWindow();
 // above for why this isn't a popup menu). Safe to call from any thread
 // (SDL's main loop calls this directly on right-click).
 void ShowLinuxContextMenu();
+
+// Tells the user a newer hTV is available. Sends a freedesktop desktop
+// notification first; if no notification server takes it (notifications
+// disabled, plasmashell not running, a bare compositor), shows hTV's own
+// "Update Available" dialog instead, with an "Open GitHub" button. Safe to
+// call from any thread; the work happens on the Qt thread.
+void NotifyLinuxUpdateAvailable(const std::string& remoteVersion, const std::string& localVersion);
 
 // Stops the Qt event loop and joins its thread. Call once during shutdown.
 void StopLinuxAudioUI();
