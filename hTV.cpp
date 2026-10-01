@@ -1216,12 +1216,6 @@ int main(int argc, char* argv[]) {
     const char* loadCmd[] = {"loadfile", streamUrl, nullptr};
     mpv_command(ctx.mpv, loadCmd);
 
-    // Left-button drag moves the window. Tracked with window-relative deltas
-    // (the window moves under the cursor, so the grab point stays fixed).
-    bool draggingWindow = false;
-    int dragGrabX = 0, dragGrabY = 0;
-    int dragWinX = 0, dragWinY = 0;
-
     SDL_Event event;
     uint32_t lastTitleUpdate = 0;
     bool needsRender = false; 
@@ -1296,13 +1290,6 @@ int main(int argc, char* argv[]) {
                         ctx.isFullscreen = !ctx.isFullscreen;
                         SDL_SetWindowFullscreen(ctx.window, ctx.isFullscreen ? SDL_WINDOW_FULLSCREEN_DESKTOP : 0);
                         SDL_ShowCursor(ctx.isFullscreen ? SDL_DISABLE : SDL_ENABLE);
-                    } else if (event.button.button == SDL_BUTTON_LEFT) {
-                        if (!ctx.isFullscreen) {
-                            draggingWindow = true;
-                            dragGrabX = event.button.x;
-                            dragGrabY = event.button.y;
-                            SDL_GetWindowPosition(ctx.window, &dragWinX, &dragWinY);
-                        }
                     } else if (event.button.button == SDL_BUTTON_MIDDLE) {
                         mpv_command_string(ctx.mpv, "cycle mute");
                     } else if (event.button.button == SDL_BUTTON_RIGHT) {
@@ -1310,26 +1297,6 @@ int main(int argc, char* argv[]) {
                         SDL_GetWindowPosition(ctx.window, &windowX, &windowY);
                         BPoint screenPoint(windowX + event.button.x, windowY + event.button.y);
                         ShowMainContextMenu(screenPoint);
-                    }
-                    break;
-                }
-                case SDL_MOUSEBUTTONUP: {
-                    if (event.button.button == SDL_BUTTON_LEFT) draggingWindow = false;
-                    break;
-                }
-                case SDL_MOUSEMOTION: {
-                    // Don't trust motion.state here (not reliably populated
-                    // on Haiku); draggingWindow is cleared on button-up.
-                    if (draggingWindow && !ctx.isFullscreen) {
-                        int dx = event.motion.x - dragGrabX;
-                        int dy = event.motion.y - dragGrabY;
-                        if (dx != 0 || dy != 0) {
-                            // Track the position ourselves: the window move is
-                            // asynchronous, so re-reading it would be stale.
-                            dragWinX += dx;
-                            dragWinY += dy;
-                            SDL_SetWindowPosition(ctx.window, dragWinX, dragWinY);
-                        }
                     }
                     break;
                 }
