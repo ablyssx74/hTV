@@ -1027,7 +1027,7 @@ static size_t UpdateCheckWriteCallback(void* contents, size_t size, size_t nmemb
 
 static int32 BackgroundUpdateChecker(void* data) {
     const char* targetUrl = "https://raw.githubusercontent.com/ablyssx74/hTV/refs/heads/main/VERSION";
-    const char* localVersion = "v1.3.0";
+    const char* localVersion = "v1.3.1";
 
     std::string buffer;
     CURL* curl = curl_easy_init();

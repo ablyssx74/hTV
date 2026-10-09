@@ -42,14 +42,14 @@ struct PlayerCtx {
     int texWidth, texHeight;
 };
 
-static const char* const kLocalVersion = "v1.3.0";
+static const char* const kLocalVersion = "v1.3.1";
 
 static size_t CurlAppend(void* data, size_t size, size_t count, void* out) {
     static_cast<std::string*>(out)->append(static_cast<const char*>(data), size * count);
     return size * count;
 }
 
-// "v1.3.0" -> 10300, so versions compare numerically (0 if unparsable).
+// "v1.3.1" -> 10301, so versions compare numerically (0 if unparsable).
 static int FlattenVersion(const char* s) {
     int a = 0, b = 0, c = 0;
     while (*s && (*s < '0' || *s > '9')) s++;

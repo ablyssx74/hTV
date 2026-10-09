@@ -7,7 +7,7 @@
 # line below in place if it doesn't already match, which is expected.
 
 pkgname=htv
-pkgver=1.3.0
+pkgver=1.3.1
 pkgrel=1
 pkgdesc="SDL2/libmpv media player with a right-click EQ/Limiter/Reverb/Chorus config window (Qt6, X11/Wayland)"
 arch=('x86_64')
