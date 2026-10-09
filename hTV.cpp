@@ -25,6 +25,7 @@
 // entirely in linux/hTV_linux.cpp and linux/linux_config_ui.h/.cpp, built
 // via CMakeLists.txt instead of this file's Makefile.
 #include <Application.h>
+#include <MessageFilter.h>
 #include <Handler.h>
 #include <Window.h>
 #include <View.h>
@@ -906,6 +907,28 @@ enum {
     MSG_OPEN_CONFIG = 'ocfg'
 };
 
+// Asked to quit by the registrar when the system shuts down or reboots, an application has to answer "yes" and
+// then quit; any "no" aborts the whole shutdown. SDL answers "no": its windows turn the request into an
+// SDL_QUIT event for the main loop and refuse to close themselves. So the request is answered here, with yes,
+// and SDL_QUIT is queued; the main loop then ends the program as it does for a closed window.
+static filter_result ShutdownRequestFilter(BMessage* message, BHandler**, BMessageFilter*) {
+    bool shutdown = false;
+    if (message->what != B_QUIT_REQUESTED
+        || message->FindBool("_shutdown_", &shutdown) != B_OK || !shutdown)
+        return B_DISPATCH_MESSAGE;
+
+    BMessage reply(B_REPLY);
+    reply.AddBool("result", true);
+    reply.AddInt32("thread", be_app->Thread());
+    message->SendReply(&reply);
+
+    SDL_Event quit;
+    SDL_zero(quit);
+    quit.type = SDL_QUIT;
+    SDL_PushEvent(&quit);
+    return B_SKIP_MESSAGE;
+}
+
 // Target for the context menu's "Config" item. Calling BPopUpMenu::Go()
 // synchronously blocks the calling thread until the menu is dismissed --
 // on the SDL main-loop thread that means SDL_WaitEvent()/mpv rendering
@@ -1066,6 +1089,7 @@ int main(int argc, char* argv[]) {
     gContextMenuHandler = new ContextMenuHandler();
     if (be_app->Lock()) {
         be_app->AddHandler(gContextMenuHandler);
+        be_app->AddCommonFilter(new BMessageFilter(B_QUIT_REQUESTED, ShutdownRequestFilter));
         be_app->Unlock();
     }
 
