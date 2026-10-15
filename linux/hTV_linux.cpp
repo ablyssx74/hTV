@@ -42,7 +42,11 @@ struct PlayerCtx {
     int texWidth, texHeight;
 };
 
-static const char* const kLocalVersion = "v1.3.1";
+// The version comes from the VERSION file: CMakeLists.txt passes it in (APP_LOCAL_VERSION="v1.3.1").
+#ifndef APP_LOCAL_VERSION
+#error "APP_LOCAL_VERSION is not set: build with CMakeLists.txt, which takes it from the VERSION file"
+#endif
+static const char* const kLocalVersion = APP_LOCAL_VERSION;
 
 static size_t CurlAppend(void* data, size_t size, size_t count, void* out) {
     static_cast<std::string*>(out)->append(static_cast<const char*>(data), size * count);

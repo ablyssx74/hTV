@@ -49,6 +49,12 @@ target_include_directories(hTV PRIVATE
 
 target_compile_options(hTV PRIVATE -Wall)
 
+# The version is the VERSION file's, the one place a release changes.
+file(STRINGS ${CMAKE_SOURCE_DIR}/VERSION HTV_VERSION_LINE LIMIT_COUNT 1)
+string(STRIP "${HTV_VERSION_LINE}" HTV_VERSION)
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS ${CMAKE_SOURCE_DIR}/VERSION)
+target_compile_definitions(hTV PRIVATE APP_LOCAL_VERSION="${HTV_VERSION}")
+
 target_link_libraries(hTV PRIVATE
     PkgConfig::SDL2
     PkgConfig::MPV

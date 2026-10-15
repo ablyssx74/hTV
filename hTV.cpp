@@ -71,6 +71,11 @@
 // linux/linux_config_ui.cpp drive the same gAudioCfg.
 #include "audio_fx.h"
 
+// The version comes from the VERSION file: the Makefile passes it in (-DAPP_LOCAL_VERSION="v1.3.1").
+#ifndef APP_LOCAL_VERSION
+#error "APP_LOCAL_VERSION is not set: build with the Makefile, which takes it from the VERSION file"
+#endif
+
 // Unified state tracker containing both graphics backend slots
 struct PlayerCtx {
     SDL_Window* window;
@@ -1027,7 +1032,7 @@ static size_t UpdateCheckWriteCallback(void* contents, size_t size, size_t nmemb
 
 static int32 BackgroundUpdateChecker(void* data) {
     const char* targetUrl = "https://raw.githubusercontent.com/ablyssx74/hTV/refs/heads/main/VERSION";
-    const char* localVersion = "v1.3.1";
+    const char* localVersion = APP_LOCAL_VERSION;
 
     std::string buffer;
     CURL* curl = curl_easy_init();

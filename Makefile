@@ -1,7 +1,11 @@
 # hTV Build Script (Native Haiku OS Conversion)
 SHELL := /bin/bash
 GUI_TARGET = hTV
-VERSION = 1.3.1
+# The one place a release changes is the VERSION file: the program, the package and the resource all take it from there.
+VERSION := $(shell tr -d 'v \r\n' < VERSION)
+V_MAJOR := $(word 1,$(subst ., ,$(VERSION)))
+V_MINOR := $(word 2,$(subst ., ,$(VERSION)))
+V_MIDDLE := $(word 3,$(subst ., ,$(VERSION)))
 REVISION = 1
 PACKAGE_DIR := build/package
 DUMMY_PC_PATH := $(shell pwd)/build/pkgconfig
@@ -37,6 +41,7 @@ endif
 
 # --- Compiler & Linker Flags ---
 CXXFLAGS = -std=c++17 -O3 -Wall
+DEFINES += -DAPP_LOCAL_VERSION=\"v$(VERSION)\"
 INCLUDES = -I/boot/home/config/non-packaged/include -I/boot/system/develop/headers
 LIB_PATH = -L/boot/system/lib$(LIB_ARCH_DIR) -L/boot/system/develop/lib$(LIB_ARCH_DIR) -L/boot/home/config/non-packaged/lib$(LIB_ARCH_DIR) 
 
@@ -66,16 +71,21 @@ endif
 	mimeset -f $(GUI_TARGET)
 
 # Compile visual layout script components (Only executes if hTV.rdef is found)
-%.rsrc: %.rdef
-	rc -o $@ $<
+# (the version fields of the resource are filled in from the VERSION file)
+%.rsrc: %.rdef VERSION
+	sed -e 's/@V_MAJOR@/$(V_MAJOR)/' -e 's/@V_MINOR@/$(V_MINOR)/' -e 's/@V_MIDDLE@/$(V_MIDDLE)/' -e 's/@VERSION@/$(VERSION)/' $< > $*.version.rdef
+	rc -o $@ $*.version.rdef
 
 # General object file compilation hooks
 %.o: %.cpp
-	$(CXX) $(CXXFLAGS) $(INCLUDES) -c $< -o $@
+	$(CXX) $(CXXFLAGS) $(DEFINES) $(INCLUDES) -c $< -o $@
+
+# The version is compiled in: a new VERSION means a new build of the file that shows it
+hTV.o: VERSION
 
 # Deep system cleaning target
 clean:
-	rm -f *.o *.rsrc *.hpkg $(GUI_TARGET) 
+	rm -f *.o *.rsrc *.hpkg *.version.rdef $(GUI_TARGET) 
 	rm -rf build
 
 

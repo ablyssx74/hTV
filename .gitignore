@@ -1,6 +1,7 @@
 # Haiku (Makefile) build artifacts
 *.o
 *.rsrc
+*.version.rdef
 *.hpkg
 /hTV
 /build_package/
